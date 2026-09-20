@@ -34,22 +34,19 @@ python -m nord_pilot.gpu_gate | tee "$out/kernel-gate.json"
 # rather than a full billed run. 20 steps vs 10+10 must still agree exactly.
 gate=(--device cuda --config "$config" --data-dir "$data" --batch-tokens 2048 --minutes "$child_minutes" \
   --schedule-steps "$schedule_steps" --eval-every 5 --checkpoint-every 10 --early-stop-patience 0 --valid-records 256)
-python nord_pilot/run.py "${gate[@]}" --out "$out/full" --steps 20 | tee "$out/full.log"
+python nord_pilot/run.py "${gate[@]}" --out "$out/full" --steps 20 --save-initial-export "$out/initial-export.pt" | tee "$out/full.log"
 python nord_pilot/run.py "${gate[@]}" --out "$out/resumed" --steps 10 | tee "$out/first-half.log"
 python nord_pilot/run.py "${gate[@]}" --out "$out/resumed" --steps 20 --resume "$out/resumed/latest.pt" | tee "$out/resume.log"
 python -m nord_pilot.compare "$out/full/latest.pt" "$out/resumed/latest.pt" --device cuda | tee "$out/recovery-gate.json"
 
-# The randomized initialization of this 20-step run is the honest "before" baseline: the
-# same untrained weights, cloned before the first update.
-cp "$out/full/export.pt" "$out/initial-export.pt"
-
-# Full schedule. The step-0 export is passed only to initialize, so the improvement is
-# measured against untrained weights rather than continuing a half-trained run.
+# Full schedule. It initializes from the same step-0 weights the baseline holds, so the
+# before/after comparison is against exactly the weights this run started from instead of a
+# half-trained checkpoint.
 # eval-every is 250 steps so validation is a small fraction of the wall clock rather than a
 # steady tax, and the final held-out score is bounded separately below.
 train=(--device cuda --config "$config" --data-dir "$data" --batch-tokens 2048 --minutes "$minutes" \
   --schedule-steps "$schedule_steps" --eval-every 250 --checkpoint-every 500 --early-stop-patience 4 --min-delta .005 \
-  --valid-records 1024 --init-export "$out/full/export.pt")
+  --valid-records 1024 --init-export "$out/initial-export.pt")
 python nord_pilot/run.py "${train[@]}" --out "$out/trained" --steps "$steps" | tee "$out/learning.log"
 
 python nord_pilot/infer.py --device cuda --data-dir "$data" --export "$out/trained/best-export.pt" --tokens 48 | tee "$out/inference.json"

@@ -40,6 +40,7 @@ def parse_args():
     ap.add_argument('--schedule-steps', type=int, default=200)
     ap.add_argument('--resume', type=Path)
     ap.add_argument('--init-export', type=Path, help='Trusted compatible export used only to initialize a fresh optimizer/run')
+    ap.add_argument('--save-initial-export',type=Path,help='Write a weights-only export of the initialization before the first update; gives an honest before/after comparison for held-out scoring instead of reusing a trained checkpoint as the baseline')
     ap.add_argument('--minutes', type=float, default=30)
     ap.add_argument('--checkpoint-every', type=int, default=10)
     ap.add_argument('--batch-tokens', type=int, default=2048)
@@ -213,6 +214,12 @@ def main():
        'device':torch.cuda.get_device_name() if a.device=='cuda' else 'CPU reference only',
        'initial_step':step,'initialization':initialization,'fingerprint':fingerprint,'initial_valid_loss':initial_valid}
     (a.out/'manifest.json').write_text(json.dumps(manifest,indent=2))
+    if a.save_initial_export:
+        # Captured before the loop below applies any update, so the weights really are the
+        # pre-training state. A finished run's export.pt is already trained and must not be
+        # used as the "untrained" baseline it would be labelled as.
+        atomic_save(a.save_initial_export,{'model':model.state_dict(),'config':cfg,
+            'tokenizer_sha256':tokenizer_sha256,'step':step,'initialization':initialization})
     print(json.dumps({'parameters':parameter_count,'start_step':step,'valid_loss':initial_valid}),flush=True)
     if a.device=='cuda': torch.cuda.reset_peak_memory_stats()
     while step < a.steps and not early_stopped and not stop[0] and time.monotonic()-start < a.minutes*60:

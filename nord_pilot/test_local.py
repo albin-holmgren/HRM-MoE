@@ -65,4 +65,26 @@ class PilotTests(unittest.TestCase):
             metrics=[json.loads(l) for l in (td/'full/metrics.jsonl').read_text().splitlines()]
             self.assertTrue(all(sum(m['expert_counts'])>0 for m in metrics))
             print(json.dumps({'local_resume':result,'training_loss':[summary['first_train_loss'],summary['last_train_loss']],'export_reload':'pass','changed_config_rejected':True}))
+
+    def test_initial_export_is_captured_before_the_first_update(self):
+        # The scaled run scores an untrained baseline against the trained model. A finished
+        # run's export.pt holds the trained step, so reusing it as the "before" number would
+        # understate the improvement; this pins the flag that captures the pre-update weights.
+        with tempfile.TemporaryDirectory() as td:
+            td=Path(td)
+            common=[sys.executable,'nord_pilot/run.py','--device','cpu','--config','nord_pilot/configs/cpu.json',
+                    '--batch-tokens','256','--minutes','2','--seed','7']
+            def start(out,initial,steps):
+                r=subprocess.run(common+['--out',str(out),'--steps',str(steps),'--save-initial-export',str(initial)],
+                                 cwd=ROOT,capture_output=True,text=True)
+                self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+                return torch.load(initial,map_location='cpu',weights_only=False)
+            early=start(td/'first',td/'first/initial-export.pt',12)
+            short=start(td/'second',td/'second/initial-export.pt',3)
+            trained=torch.load(td/'first/export.pt',map_location='cpu',weights_only=False)
+            self.assertEqual(early['step'],0);self.assertEqual(trained['step'],12)
+            # Same seed, so both baselines are the same random initialization; and the baseline
+            # must differ from the weights the 12-step run finished with.
+            self.assertTrue(all(torch.equal(early['model'][k],short['model'][k]) for k in early['model']))
+            self.assertTrue(any(not torch.equal(early['model'][k],trained['model'][k]) for k in early['model']))
 if __name__=='__main__':unittest.main()
