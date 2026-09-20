@@ -563,3 +563,32 @@ GPU, distributed, FA3, and FSDP2 behavior should be validated through rjob.
 - Do not assume the browser debugger attaches to an existing console tab. Open a fresh
   agent tab for Verda console work, and treat the temporary Cloud API key as revoked
   only once the page shows "You currently have no cloud API keys".
+
+- Bounded held-out scoring is now mandatory for paid runs. `evaluate_corpus.py` gained
+  `--test-records` and `--disjoint-limit`: scoring the whole built corpus means 151M
+  target tokens, roughly 2.4 hours of forward passes per model on one H100, and the
+  unbounded leak check reads all 18 GB of train.jsonl. When either bound is active the
+  report says it scored a prefix and that leakage inspection was a spot check, so a
+  capped run never reads as a full audit.
+- The scaled paid run is `work/verda-scale-private/run-scale.sh` (free steps 1-3, then
+  provision, run, verify, delete). `nord_pilot/gpu_scale_test.sh` is the on-GPU plan:
+  kernel gate, 20-vs-10+10 recovery equivalence, training from a step-0 export, then
+  bounded held-out scoring against that same untrained initialization. Its PASS gate is
+  exercised without a GPU by `work/verda-scale-private/test-pass-gate.py`, which runs the
+  shipped heredoc against synthetic results; 5/5 cases behave as intended.
+- Ship a bounded corpus prefix, not the full 21 GB. `stage-corpus.py` takes the first N
+  records in file order, which is the same order the streaming reader consumes, so a
+  prefix is equivalent for a short run. Measured: 2M train records = 447M tokens = 2.9 GB,
+  gzipped to 1.04 GB at `gzip -1` (about 212 MB/s here), i.e. roughly two minutes of upload
+  onto the H100. That is why no CPU staging instance is required.
+- `preflight.py` indexes and decodes the staged corpus with the trainer's own `JsonlCorpus`
+  on CPU for free; 2M train / 40k valid records index in 1.2 s at 0.13 GB peak RSS. Only
+  trust its memory number after the macOS/linux `ru_maxrss` unit fix (bytes vs kilobytes).
+- Budget reality for the scaled run: a 25-minute window is roughly 15-25M tokens, about 3-4
+  passes over the 8M-token staged validation split. `cost_model.py --plan` says a full
+  2.81B-token pass at 150M-260M parameters is about $152-304 of H100 time, so the scaled
+  run is a fraction of the eventual budget and is meant to be spent once, then reviewed.
+- Verda credentials do not exist on this machine and the Codex desktop app refused the
+  request, so the paid steps cannot run unattended. `deploy.py` needs `credentials.json`
+  (mode 600) in `work/verda-scale-private/`; the guard rejects any file that is group- or
+  world-readable, and the packaging step excludes the credential from the upload bundle.
