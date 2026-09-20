@@ -956,3 +956,11 @@ AIME25 Majority Voting（百分比）：
 - 保留 step40 export 与 step200 full checkpoint/export。后续训练应使用真实去重语料、完整 held-out evaluation、best-checkpoint selection 和 early stopping；此轮不继续消耗预算调 synthetic fixture。
 
 - 清理完成：28 文件 / 2,265,944,391 bytes 已下载并 SHA-256 全匹配；step40/200 exports 本地加载检查 finite。GPU 删除确认、active instances=[]、active volumes=[]；OS volume soft-deleted（96h 可恢复），temporary SSH/API credentials 已撤销。余额从 $25 到 $23.30545（console $23.31），当前扣费 $1.69455，可能另有未使用预付时间退款。
+
+## 2026-09-20 本地后续验证（新增云费用 $0）
+
+- 对已保存的 94M step40/200 exports 使用 CPU FP32 reference attention + grouped experts；不声称与 CUDA BF16 数值相同。每个 checkpoint 生成 80 条，五组各 16 条；完整 teacher-forced 验证覆盖 32 条。
+- step40/200 全部 held-out loss 分别 1.7218426 / 2.1414323，确认继续训练导致过拟合。熟悉样本和改为已见过的小时均 16/16 正确；未见小时均 0/16 正确；held-out 小时 16/16 正确但引用 0/16。替换 source ID 后引用仅 4/16、5/16 正确。
+- 专门针对单商店 fixture 的规则检查器：每个模型 80 条中 64 条正确输出、16 条拒答。该结果包含训练样本，不能作为通用模型质量分数。生成仅在 fixture tokenizer 的实际词表中 greedy 解码，最多 24 tokens。
+- runner 新增全量验证、best-export.pt、可选 early stopping，checkpoint 保存 selection 与 best_model；CPU 连续/恢复训练 75 tensors 完全一致。已早停 checkpoint 恢复后不再训练，best weights 未被末尾权重覆盖。14 项测试通过。新增 runner 尚未在 GPU 复测；首轮 H100 gate 失败记录保持不变。
+- 旧 GPU full checkpoint 应使用保留的 050bd0a 打包版本恢复；新 runner fingerprint/selection 格式变化，不能假装直接兼容。

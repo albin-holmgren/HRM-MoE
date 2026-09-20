@@ -22,7 +22,7 @@ def compare(left,right,device):
             assert len(x)==len(y)
             for xx,yy in zip(x,y):walk(xx,yy)
         else:assert x==y
-    for k in ('model','optim','rng','python_rng','cuda_rng'):walk(a[k],b[k])
+    for k in ('model','optim','rng','python_rng','cuda_rng','selection','best_model'):walk(a[k],b[k])
     return {'status':'resume_equivalence_pass','tensors_compared':count[0],'max_abs_difference':maximum[0],'step':a['step'],'tolerance':tol}
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('left');p.add_argument('right');p.add_argument('--device',required=True);a=p.parse_args();print(json.dumps(compare(a.left,a.right,a.device)))

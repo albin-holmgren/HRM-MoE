@@ -170,3 +170,11 @@ The later cumulative $125 product-quality gate still requires real data and task
 
 Sources: https://github.com/XiaoYee/HRM-MoE ; https://api.verda.com/v1/docs ;
 https://docs.verda.com/cpu-and-gpu-instances/shutdown-hibernate-and-delete/
+
+## Local follow-up after the first H100 test
+
+The first H100 run overfit the synthetic fixture. The follow-up runner evaluates the entire validation split and retains `best-export.pt` separately from the latest `export.pt`. Selection runs at step 0 and fixed global multiples of `--eval-every` (default 10); an unscheduled partial-run endpoint is reported but not selected. `--early-stop-patience 3` enables stopping after three checks without the requested `--min-delta` improvement. Patience defaults to 0 (disabled). Best weights add a CPU copy and additional checkpoint storage.
+
+Selection state survives recovery; resuming an already early-stopped checkpoint does not resume learning. These changes passed local CPU tests, not a second H100 run. The original GPU run used b8aa07d; preserve the original 050bd0a delivery archive to resume its full checkpoints because runner fingerprints and selection state have changed. Saved exports remain usable by the local auditor.
+
+Run `python -m unittest nord_pilot.test_local nord_pilot.test_guard nord_pilot.test_followup`. Run `python nord_pilot/evaluate_saved.py --exports PATH_TO_STEP40 PATH_TO_STEP200 --out NEW_REPORT_DIRECTORY` to audit exports with CPU reference kernels. Generation is greedy, limited to 24 tokens and the fixture tokenizer's populated vocabulary. `grounding_check.py` is deliberately restricted to the fictional single-shop opening-hours grammar; its improvements are not general model capability.

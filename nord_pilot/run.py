@@ -41,6 +41,9 @@ def parse_args():
     ap.add_argument('--minutes', type=float, default=30)
     ap.add_argument('--checkpoint-every', type=int, default=10)
     ap.add_argument('--batch-tokens', type=int, default=2048)
+    ap.add_argument('--early-stop-patience',type=int,default=0,help='0 disables stopping; best export is still retained')
+    ap.add_argument('--eval-every',type=int,default=10)
+    ap.add_argument('--min-delta',type=float,default=0.0)
     ap.add_argument('--seed', type=int, default=42)
     ap.add_argument('--stress-context', action='store_true', help='Fill each prefix to the context limit for a kernel/memory stress test, not quality training')
     return ap.parse_args()
@@ -49,6 +52,8 @@ def main():
     a = parse_args()
     if not (0 < a.steps <= a.schedule_steps and a.minutes > 0 and a.checkpoint_every > 0):
         raise ValueError('Invalid step/time bounds')
+    if a.early_stop_patience < 0 or a.eval_every <= 0 or a.min_delta < 0:
+        raise ValueError('Invalid validation controls')
     if a.device == 'cpu':
         os.environ['NORD_REFERENCE_ATTENTION'] = '1'
     elif os.environ.get('NORD_REFERENCE_ATTENTION') == '1':
@@ -84,11 +89,14 @@ def main():
     parameter_count = sum(p.numel() for p in model.parameters())
     fingerprint = {'config':cfg, 'tokenizer_sha256':digest(ROOT/'data/tokenizer.json'),
        'train_sha256':digest(ROOT/'data/train.jsonl'), 'valid_sha256':digest(ROOT/'data/valid.jsonl'),
+       'early_stop_patience':a.early_stop_patience,'eval_every':a.eval_every,'min_delta':a.min_delta,
        'batch_tokens':a.batch_tokens,'schedule_steps':a.schedule_steps,'seed':a.seed,'device':a.device,
        'source_sha256':digest(__file__), 'reference_sha256':digest(ROOT/'reference_attention.py'), 'torch_version':str(torch.__version__), 'stress_context':a.stress_context}
     # Bind recovery to the source tree, not just the runner.
     fingerprint['model_sources'] = {str(p.relative_to(ROOT.parent)):digest(p) for p in sorted((ROOT.parent/'models').rglob('*.py'))}
     step, cursor = 0, 0
+    selection={'best_loss':float('inf'),'best_step':0,'bad_checks':0,'last_eval_step':-1}
+    best_model=None; early_stopped=False
     if a.resume:
         ck = torch.load(a.resume, map_location='cpu', weights_only=False)  # Only trusted own checkpoints.
         if ck['fingerprint'] != fingerprint:
@@ -96,6 +104,8 @@ def main():
         model.load_state_dict(ck['model'])
         optim.load_state_dict(ck['optim'])
         step, cursor = ck['step'], ck['cursor']
+        selection=ck['selection'];best_model=ck['best_model']
+        early_stopped=a.early_stop_patience>0 and selection['bad_checks']>=a.early_stop_patience
         torch.set_rng_state(ck['rng'])
         random.setstate(ck['python_rng'])
         if a.device == 'cuda': torch.cuda.set_rng_state_all(ck['cuda_rng'])
@@ -118,10 +128,11 @@ def main():
             p=[p[0]]+(middle*((target+len(middle))//len(middle)))[:target-2]+[p[-1]]
             return p,r
         encoded={k:[extend(pair) for pair in pairs] for k,pairs in encoded.items()}
-    def batch_at(name, start, budget):
+    def batch_at(name, start, budget, max_records=None):
         inputs, labels, positions, pl, cl, cu = [], [], [], [], [], [0]
         count = 0
-        while count < len(encoded[name]):
+        limit=len(encoded[name]) if max_records is None else min(max_records,len(encoded[name]))
+        while count < limit:
             p, r = encoded[name][(start+count)%len(encoded[name])]
             n = len(p)+len(r)-1
             if len(inputs)+n > budget: break
@@ -148,11 +159,27 @@ def main():
         return loss,ce,ctx
     def evaluate():
         model.eval()
+        total_loss=0.0;total_targets=0;offset=0
         with torch.no_grad():
-            b,y,_=batch_at('valid',0,a.batch_tokens)
-            _,ce,_=loss_at(b,y,False)
+            while offset < len(encoded['valid']):
+                b,y,offset=batch_at('valid',offset,a.batch_tokens,len(encoded['valid'])-offset)
+                _,ce,_=loss_at(b,y,False)
+                n=int((y!=-100).sum());total_loss+=float(ce)*n;total_targets+=n
         model.train()
-        return float(ce)
+        result=total_loss/total_targets
+        if not torch.isfinite(torch.tensor(result)):raise RuntimeError('Nonfinite validation loss')
+        return result
+    def observe_validation(value):
+        nonlocal best_model,early_stopped
+        if selection['last_eval_step']==step:return
+        selection['last_eval_step']=step
+        if value < selection['best_loss']-a.min_delta:
+            selection.update(best_loss=value,best_step=step,bad_checks=0)
+            best_model={k:v.detach().cpu().clone() for k,v in model.state_dict().items()}
+        else:selection['bad_checks']+=1
+        early_stopped=a.early_stop_patience>0 and selection['bad_checks']>=a.early_stop_patience
+        with (a.out/'validation.jsonl').open('a') as f:
+            f.write(json.dumps({'step':step,'loss':value,'examples':len(encoded['valid']),**selection,'early_stopped':early_stopped})+'\n')
     def atomic_save(path, obj):
         temp=path.with_suffix('.tmp')
         torch.save(obj,temp)
@@ -164,18 +191,20 @@ def main():
             import shutil
             shutil.copy2(a.out/'latest.pt',a.out/'previous.pt')
         atomic_save(a.out/'latest.pt',dict(model=model.state_dict(),optim=optim.state_dict(),step=step,cursor=cursor,
+            selection=selection,best_model=best_model,
             rng=torch.get_rng_state(),python_rng=random.getstate(),cuda_rng=torch.cuda.get_rng_state_all() if a.device=='cuda' else [],fingerprint=fingerprint))
     stop=[False]
     for sig in (signal.SIGTERM, signal.SIGINT): signal.signal(sig,lambda *args:stop.__setitem__(0,True))
     start=time.monotonic(); times=[]; losses=[]; tokens=0
     initial_valid=evaluate()
+    if best_model is None:observe_validation(initial_valid)
     manifest={'parameters':parameter_count,'torch':torch.__version__,'cuda':torch.version.cuda,
        'device':torch.cuda.get_device_name() if a.device=='cuda' else 'CPU reference only',
        'initial_step':step,'fingerprint':fingerprint,'initial_valid_loss':initial_valid}
     (a.out/'manifest.json').write_text(json.dumps(manifest,indent=2))
     print(json.dumps({'parameters':parameter_count,'start_step':step,'valid_loss':initial_valid}),flush=True)
     if a.device=='cuda': torch.cuda.reset_peak_memory_stats()
-    while step < a.steps and not stop[0] and time.monotonic()-start < a.minutes*60:
+    while step < a.steps and not early_stopped and not stop[0] and time.monotonic()-start < a.minutes*60:
         b,y,next_cursor=batch_at('train',cursor,a.batch_tokens)
         if a.device=='cuda': torch.cuda.synchronize()
         t=time.monotonic()
@@ -194,15 +223,18 @@ def main():
              'supervised_tokens':int((y!=-100).sum()),'grad_norm':float(norm),'expert_counts':counts}
         with (a.out/'metrics.jsonl').open('a') as f:f.write(json.dumps(metric)+'\n')
         if step % 10==0:print(json.dumps(metric),flush=True)
+        if step % a.eval_every==0:observe_validation(evaluate())
         if step % a.checkpoint_every==0:save()
     save()
     final_valid=evaluate()
     atomic_save(a.out/'export.pt',{'model':model.state_dict(),'config':cfg,'tokenizer_sha256':fingerprint['tokenizer_sha256'],'step':step})
-    summary={'status':'completed' if step==a.steps else 'bounded_stop','step':step,'initial_valid_loss':initial_valid,
+    atomic_save(a.out/'best-export.pt',{'model':best_model,'config':cfg,'tokenizer_sha256':fingerprint['tokenizer_sha256'],'step':selection['best_step'],'validation_loss':selection['best_loss']})
+    summary={'status':'early_stopped' if early_stopped else ('completed' if step==a.steps else 'bounded_stop'),'step':step,'initial_valid_loss':initial_valid,
+       'best_valid_loss':selection['best_loss'],'best_step':selection['best_step'],'validation_examples':len(encoded['valid']),
        'final_valid_loss':final_valid,'first_train_loss':losses[0] if losses else None,'last_train_loss':losses[-1] if losses else None,
        'input_tokens':tokens,'training_seconds':sum(times),'tokens_per_training_second':tokens/sum(times) if times else None,
        'peak_memory_bytes':torch.cuda.max_memory_allocated() if a.device=='cuda' else None,
        'wall_seconds':time.monotonic()-start,'capability_claim':'none; synthetic technical fixture'}
     (a.out/'summary.json').write_text(json.dumps(summary,indent=2));print(json.dumps(summary),flush=True)
-    if step!=a.steps:sys.exit(3)
+    if step!=a.steps and not early_stopped:sys.exit(3)
 if __name__=='__main__':main()
