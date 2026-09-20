@@ -1,7 +1,14 @@
-import datetime,unittest
-from nord_pilot.verda_guard import delete_payload,check_identity,elapsed_cost,remove_instance
+import datetime,unittest,io,tempfile
+from pathlib import Path
+from unittest.mock import patch
+from nord_pilot.verda_guard import API,delete_payload,check_identity,elapsed_cost,remove_instance
 ID='11111111-2222-4333-8444-555555555555'
 class GuardTests(unittest.TestCase):
+    def test_plain_uuid_creation_response(self):
+        with tempfile.TemporaryDirectory() as td:
+            p=Path(td)/'credentials.json';p.write_text('{"client_id":"test","client_secret":"test"}');p.chmod(0o600)
+            with patch('urllib.request.urlopen',side_effect=[io.BytesIO(b'{"access_token":"test"}'),io.BytesIO(ID.encode())]):
+                self.assertEqual(API(p)('POST','/sshkeys',{}),ID)
     def test_delete_keeps_all_volumes(self):
         self.assertEqual(delete_payload(ID)['volume_ids'],[])
         self.assertFalse(delete_payload(ID)['delete_permanently'])

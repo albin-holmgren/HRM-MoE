@@ -939,3 +939,5 @@ AIME25 Majority Voting（百分比）：
 - PrefixLM mask isolation、配置变更拒绝、覆盖保护及 mocked Verda guard tests 通过。
 - CUDA/FA3/Triton equivalence、H100 throughput、GPU memory 和 live API cleanup 尚未验证；未租用 GPU。
 - 已固定公开容器 AMD64 digest，测试窗口为 instance creation 后两小时，估算 $20 停止 / $25 预算。
+
+- 2026-09-20 实际 Verda API 验证：balance=25 USD，SSH key 创建返回 plain UUID；修复 parser 并通过 mocked regression test。GPU 尚未部署。

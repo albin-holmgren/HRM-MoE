@@ -31,7 +31,13 @@ class API:
         req=urllib.request.Request(BASE+path,data=json.dumps(payload).encode() if payload is not None else None,method=method,headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
         try:
             with urllib.request.urlopen(req,timeout=20) as r:
-                data=r.read();return json.loads(data) if data else None
+                data=r.read()
+                if not data:return None
+                try:return json.loads(data)
+                except json.JSONDecodeError:
+                    value=data.decode().strip()
+                    uuid.UUID(value)  # Creation endpoints return an unquoted UUID.
+                    return value
         except urllib.error.HTTPError as e:
             if method=='GET' and e.code==404:return None
             raise RuntimeError(f'Verda API returned HTTP {e.code}') from None
