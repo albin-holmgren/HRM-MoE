@@ -12,12 +12,13 @@ def main():
     from tokenizers import Tokenizer
     from models.baselines.hrm_nocarry_bp_warmup import HierarchicalReasoningModel
     from models.lm_head import LMHead
-    from nord_pilot.run import digest
+    from nord_pilot.run import digest, configure_cuda_mixed_precision
     torch.set_num_threads(4)
     ck=torch.load(a.export,map_location='cpu',weights_only=False)
     assert digest(ROOT/'data/tokenizer.json')==ck['tokenizer_sha256']
     cfg=ck['config']; model=LMHead(HierarchicalReasoningModel(cfg),cfg).to(a.device)
     model.load_state_dict(ck['model']);model.eval()
+    if a.device=='cuda':configure_cuda_mixed_precision(model)
     tok=Tokenizer.from_file(str(ROOT/'data/tokenizer.json'))
     row=json.loads((ROOT/'data/valid.jsonl').read_text().splitlines()[0])
     ids=[tok.token_to_id('[BOS]')]+tok.encode(row['instruction']).ids+[tok.token_to_id('[SEP]')]

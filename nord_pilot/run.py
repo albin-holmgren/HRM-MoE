@@ -18,6 +18,18 @@ sys.path.insert(0, str(ROOT.parent))
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
+def configure_cuda_mixed_precision(model):
+    # Autocast handles Linear/FA3 inputs, but not custom Triton expert dispatch.
+    # Keep FP32 master weights and residuals; explicitly cast at each MoE boundary.
+    import torch
+    from models.layers import SparseMoESwiGLU
+    def cast_input(module, args):
+        if not torch.is_autocast_enabled('cuda'):
+            raise RuntimeError('CUDA pilot MoE requires an explicit autocast context')
+        return (args[0].to(torch.get_autocast_dtype('cuda')), *args[1:])
+    for module in model.modules():
+        if isinstance(module, SparseMoESwiGLU):module.register_forward_pre_hook(cast_input)
+
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument('--device', choices=['cpu','cuda'], required=True)
@@ -67,6 +79,7 @@ def main():
     if (a.out/'latest.pt').exists() and not a.resume:
         raise RuntimeError('Existing run: use --resume or choose a new output directory')
     model = LMHead(HierarchicalReasoningModel(cfg), cfg).to(a.device)
+    if a.device == 'cuda':configure_cuda_mixed_precision(model)
     optim = AdamATan2(model.parameters(), lr=2e-4, ema=0.999)
     parameter_count = sum(p.numel() for p in model.parameters())
     fingerprint = {'config':cfg, 'tokenizer_sha256':digest(ROOT/'data/tokenizer.json'),

@@ -518,3 +518,5 @@ GPU, distributed, FA3, and FSDP2 behavior should be validated through rjob.
 - Verda creation endpoints may return an unquoted UUID despite application/json schema; parse only valid UUID strings as the non-JSON fallback. After ambiguous mutation responses, list resources before retrying.
 
 - Packed FA3 PrefixLM requires prefix_lens with numseqs+1 entries and a terminal zero; the shifted cumulative lengths use this sentinel. CPU references must enforce the same metadata contract.
+
+- Single-device autocast does not cast the custom Triton expert input. Pilot runner explicitly casts MoE boundary activations to BF16 in a pre-hook while retaining FP32 master weights/residuals; apply the same setup on export reload.

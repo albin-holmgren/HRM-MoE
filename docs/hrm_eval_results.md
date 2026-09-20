@@ -943,3 +943,5 @@ AIME25 Majority Voting（百分比）：
 - 2026-09-20 实际 Verda API 验证：balance=25 USD，SSH key 创建返回 plain UUID；修复 parser 并通过 mocked regression test。GPU 尚未部署。
 
 - Verda H100 首次 native gate 在训练前发现 pilot prefix_lens 少 terminal zero sentinel。已修复 train/infer/gate metadata，并令 CPU reference 同样检查此约束；没有修改 attention kernel。
+
+- 第二次 H100 gate：native FA3 和 Triton expert forward/backward reference comparison 通过。完整模型 evaluation 发现 autocast 未覆盖 custom Triton FP32 activation；runner/infer 加入明确 BF16 MoE input boundary，保留 FP32 master weights/residual。
