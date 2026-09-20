@@ -993,3 +993,12 @@ AIME25 Majority Voting（百分比）：
 - 30 文件 / 2,216,555,603 bytes 下载后逐项 SHA-256 全匹配；step20 与 step600 exports 本地可加载，三份 export 的 43 个 state tensors 均 finite。完整 checkpoint 和原始输出归档至 `outputs/nord-real-h100-results/results.tar`，执行 source/data 单独保存。
 - GPU 删除及 150 GiB OS volume soft-delete 已确认，active instances=[] / active volumes=[]，临时 SSH key 删除，本地 guard 已退出。此时 balance $23.92944 -> $22.23489（console $22.23），本轮当前扣费 $1.69455，所有试验相对 $25 的累计净扣费 $2.76511；未使用预付时间仍可能退款，不能把当前扣费当作最终结算发票。
 - 临时 Cloud API credential 已撤销，console 明确显示 no cloud API keys；本地 credentials JSON 与临时 SSH private key 已删除。历史试验归档保持原样。
+
+## 2026-09-20 长训练续跑准备
+
+- 新增长跑必须通过 `--init-export` 从可信 step600 best export 初始化；严格检查 config、tokenizer SHA 和 parent export SHA，fresh optimizer 后的 checkpoint 仍使用完整 fingerprint 做 exact resume。父 export 的 43 tensors 均 finite，step=600，配置和 tokenizer 验证一致。
+- Hugging Face dataset server 在尝试 4x 下载时返回 429；保留已下载缓存，加入 Retry-After/backoff 和 0.5s pacing，随后完成 balanced 2x 数据，不为追求数量绕过服务器限制。
+- 新语料 fetched=11,000、kept=9,845。train=8,855 docs / 8,491,772 supervised tokens；valid=523 docs / 515,382 targets；test=467 docs / 411,432 targets。旧 tokenizer SHA `20e32e...425a` byte-for-byte 保持不变。
+- `test-fresh.jsonl` 含 233 个新增 test docs / 934 chunks / 208,981 targets；与 base provenance、train、valid 的 doc overlap 均为 0。最大 chunk=254 tokens，所有 token id 在 8,192 vocabulary 内。
+- 下一轮计划最多 9,000 steps、约 17M training tokens（约两次 train token pass），每 1,000 steps 全量 validation，patience=3 / min_delta=.005；先做 20 vs 10+10 exact recovery，再做 fresh-test loss 和六条固定 completion。该设计仍是 69.2M 技术试验，不是 0.6B 或产品能力声明。
+- 本地 12 tests 通过；包含 weights-only initialization 后 fresh optimizer run、同 lineage exact resume、原有 75-tensor CPU recovery、data filters 和 grounding checks。GPU native gate 仍需在新 instance 上复测。

@@ -39,6 +39,7 @@ def parse_args():
     ap.add_argument('--steps', type=int, default=40)
     ap.add_argument('--schedule-steps', type=int, default=200)
     ap.add_argument('--resume', type=Path)
+    ap.add_argument('--init-export', type=Path, help='Trusted compatible export used only to initialize a fresh optimizer/run')
     ap.add_argument('--minutes', type=float, default=30)
     ap.add_argument('--checkpoint-every', type=int, default=10)
     ap.add_argument('--batch-tokens', type=int, default=2048)
@@ -76,6 +77,7 @@ def main():
     random.seed(a.seed)
     cfg = json.loads(a.config.read_text())
     tok = Tokenizer.from_file(str(a.data_dir/'tokenizer.json'))
+    tokenizer_sha256=digest(a.data_dir/'tokenizer.json')
     if tok.get_vocab_size() > cfg['vocab_size']:
         raise ValueError('Tokenizer does not fit model vocabulary')
     if a.batch_tokens < cfg['max_seq_len']:
@@ -86,13 +88,22 @@ def main():
         raise RuntimeError('Existing run: use --resume or choose a new output directory')
     model = LMHead(HierarchicalReasoningModel(cfg), cfg).to(a.device)
     if a.device == 'cuda':configure_cuda_mixed_precision(model)
+    initialization={'kind':'random','parent_step':None,'parent_sha256':None}
+    if a.init_export:
+        parent=torch.load(a.init_export,map_location='cpu',weights_only=False)  # Only trusted own exports.
+        if parent.get('config')!=cfg or parent.get('tokenizer_sha256')!=tokenizer_sha256:
+            raise RuntimeError('Initialization export config/tokenizer mismatch')
+        initialization={'kind':'weights_only_export','parent_step':parent.get('step'),'parent_sha256':digest(a.init_export)}
+        if not a.resume:model.load_state_dict(parent['model'])
+        del parent
     optim = AdamATan2(model.parameters(), lr=2e-4, ema=0.999)
     parameter_count = sum(p.numel() for p in model.parameters())
-    fingerprint = {'config':cfg, 'tokenizer_sha256':digest(a.data_dir/'tokenizer.json'),
+    fingerprint = {'config':cfg, 'tokenizer_sha256':tokenizer_sha256,
        'train_sha256':digest(a.data_dir/'train.jsonl'), 'valid_sha256':digest(a.data_dir/'valid.jsonl'),
        'early_stop_patience':a.early_stop_patience,'eval_every':a.eval_every,'min_delta':a.min_delta,
        'batch_tokens':a.batch_tokens,'schedule_steps':a.schedule_steps,'seed':a.seed,'device':a.device,
-       'records_source_sha256':digest(ROOT/'data_tools/records.py'),'source_sha256':digest(__file__), 'reference_sha256':digest(ROOT/'reference_attention.py'), 'torch_version':str(torch.__version__), 'stress_context':a.stress_context}
+       'records_source_sha256':digest(ROOT/'data_tools/records.py'),'source_sha256':digest(__file__), 'reference_sha256':digest(ROOT/'reference_attention.py'), 'torch_version':str(torch.__version__), 'stress_context':a.stress_context,
+       'initialization':initialization}
     # Bind recovery to the source tree, not just the runner.
     fingerprint['model_sources'] = {str(p.relative_to(ROOT.parent)):digest(p) for p in sorted((ROOT.parent/'models').rglob('*.py'))}
     step, cursor = 0, 0
@@ -197,7 +208,7 @@ def main():
     if best_model is None:observe_validation(initial_valid)
     manifest={'parameters':parameter_count,'torch':torch.__version__,'cuda':torch.version.cuda,
        'device':torch.cuda.get_device_name() if a.device=='cuda' else 'CPU reference only',
-       'initial_step':step,'fingerprint':fingerprint,'initial_valid_loss':initial_valid}
+       'initial_step':step,'initialization':initialization,'fingerprint':fingerprint,'initial_valid_loss':initial_valid}
     (a.out/'manifest.json').write_text(json.dumps(manifest,indent=2))
     print(json.dumps({'parameters':parameter_count,'start_step':step,'valid_loss':initial_valid}),flush=True)
     if a.device=='cuda': torch.cuda.reset_peak_memory_stats()
