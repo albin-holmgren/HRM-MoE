@@ -719,8 +719,10 @@ def main():
                 "tokenizer_training_split": "train only",
                 "tokenizer_sample": f"at most {a.tokenizer_docs} train documents, selected by "
                                     "stable document hash, spread across sources",
-                "near_dedup": f"{SHINGLE}-word shingles, bottom-{SKETCH} k-minimum-values sketch "
-                              f"(not 32-permutation MinHash), {BANDS} band keys grouped by sort; "
+                "near_dedup": f"{SHINGLE}-word polynomial-window shingles, {SKETCH}-permutation "
+                              "affine MinHash under a 31-bit prime modulus (products stay "
+                              "exact and the map is a bijection, so the shared-position "
+                              f"estimate is unbiased), {BANDS} band keys grouped by sort; "
                               "a pair is only compared when every id in one band is shared, so "
                               f"near-duplicates that differ inside a band are missed; a compared "
                               f"pair is dropped when >= {SKETCH_JACCARD:.0%} of the 32 ids match; "
