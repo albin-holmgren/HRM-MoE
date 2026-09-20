@@ -119,7 +119,7 @@ def main():
             count += 1
         if count == 0: raise ValueError('No sample fits batch budget')
         to = lambda x: torch.tensor(x,dtype=torch.int32,device=a.device)
-        batch = dict(inputs=to(inputs),position_ids=to(positions),prefix_lens=to(pl),causal_lens=to(cl),cu_seqlens=to(cu))
+        batch = dict(inputs=to(inputs),position_ids=to(positions),prefix_lens=to(pl+[0]),causal_lens=to(cl),cu_seqlens=to(cu))
         for k,v in dict(total_seqlen=len(inputs),numseqs=count,max_seqlen_prefix=max(pl),max_seqlen_causal=max(cl),max_seqlen_all=max(x+y for x,y in zip(pl,cl))).items():
             batch[k] = torch.tensor(v,dtype=torch.int32,device='cpu')
         return batch, to(labels).long(), start+count

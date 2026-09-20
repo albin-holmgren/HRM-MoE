@@ -7,7 +7,7 @@ from models.layers import SparseMoEGroupedExperts
 def main():
     assert torch.cuda.is_available() and torch.cuda.get_device_capability()[0]==9
     torch.manual_seed(3)
-    kwargs=dict(is_causal=False,prefix_lens=torch.tensor([5,3],device='cuda',dtype=torch.int32),
+    kwargs=dict(is_causal=False,prefix_lens=torch.tensor([5,3,0],device='cuda',dtype=torch.int32),
       causal_lens=torch.tensor([4,4],device='cuda',dtype=torch.int32),cu_seqlens=torch.tensor([0,9,16],device='cuda',dtype=torch.int32))
     kwargs.update({k:torch.tensor(v,dtype=torch.int32) for k,v in dict(total_seqlen=16,numseqs=2,max_seqlen_prefix=5,max_seqlen_causal=4,max_seqlen_all=9).items()})
     qkv=[torch.randn(16,4,128,device='cuda',dtype=torch.bfloat16,requires_grad=True) for _ in range(3)]

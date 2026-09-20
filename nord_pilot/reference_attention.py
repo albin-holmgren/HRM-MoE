@@ -5,6 +5,8 @@ import torch.nn.functional as F
 
 def flash_attn_varlen_prefixlm(q, k, v, is_causal, prefix_lens, causal_lens,
                               cu_seqlens, total_seqlen, numseqs, **unused):
+    # Match native FA3's shifted cu_seqlens convention, including terminal zero.
+    assert len(prefix_lens) >= int(numseqs)+1 and int(prefix_lens[int(numseqs)]) == 0, 'prefix_lens needs a terminal zero sentinel'
     outputs = []
     for j in range(int(numseqs)):
         start, end = int(cu_seqlens[j]), int(cu_seqlens[j + 1])

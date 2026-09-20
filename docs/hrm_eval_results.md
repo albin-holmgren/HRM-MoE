@@ -941,3 +941,5 @@ AIME25 Majority Voting（百分比）：
 - 已固定公开容器 AMD64 digest，测试窗口为 instance creation 后两小时，估算 $20 停止 / $25 预算。
 
 - 2026-09-20 实际 Verda API 验证：balance=25 USD，SSH key 创建返回 plain UUID；修复 parser 并通过 mocked regression test。GPU 尚未部署。
+
+- Verda H100 首次 native gate 在训练前发现 pilot prefix_lens 少 terminal zero sentinel。已修复 train/infer/gate metadata，并令 CPU reference 同样检查此约束；没有修改 attention kernel。

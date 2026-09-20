@@ -516,3 +516,5 @@ GPU, distributed, FA3, and FSDP2 behavior should be validated through rjob.
   and bundled separately in the handoff archive. They are not a production dataset.
 
 - Verda creation endpoints may return an unquoted UUID despite application/json schema; parse only valid UUID strings as the non-JSON fallback. After ambiguous mutation responses, list resources before retrying.
+
+- Packed FA3 PrefixLM requires prefix_lens with numseqs+1 entries and a terminal zero; the shifted cumulative lengths use this sentinel. CPU references must enforce the same metadata contract.

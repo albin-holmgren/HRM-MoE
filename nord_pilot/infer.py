@@ -27,7 +27,7 @@ def main():
             if len(ids)>=cfg['max_seq_len']:break
             n=len(ids)
             to=lambda x:torch.tensor(x,dtype=torch.int32,device=a.device)
-            batch={'inputs':to(ids),'position_ids':to(list(range(n))),'prefix_lens':to([prefix]),'causal_lens':to([n-prefix]),'cu_seqlens':to([0,n])}
+            batch={'inputs':to(ids),'position_ids':to(list(range(n))),'prefix_lens':to([prefix,0]),'causal_lens':to([n-prefix]),'cu_seqlens':to([0,n])}
             for k,v in dict(total_seqlen=n,numseqs=1,max_seqlen_prefix=prefix,max_seqlen_causal=n-prefix,max_seqlen_all=n).items():batch[k]=torch.tensor(v,dtype=torch.int32)
             with torch.autocast('cuda',dtype=torch.bfloat16) if a.device=='cuda' else contextlib.nullcontext():
                 _,logits=model(None,batch)

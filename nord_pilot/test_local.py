@@ -11,7 +11,7 @@ class PilotTests(unittest.TestCase):
         # Two packed sequences: two prefix positions followed by two causal positions.
         torch.manual_seed(1)
         q,k,v=[torch.randn(8,1,8,requires_grad=True) for _ in range(3)]
-        args=dict(is_causal=False,prefix_lens=torch.tensor([2,2]),causal_lens=torch.tensor([2,2]),cu_seqlens=torch.tensor([0,4,8]),total_seqlen=8,numseqs=2)
+        args=dict(is_causal=False,prefix_lens=torch.tensor([2,2,0]),causal_lens=torch.tensor([2,2]),cu_seqlens=torch.tensor([0,4,8]),total_seqlen=8,numseqs=2)
         a=flash_attn_varlen_prefixlm(q,k,v,**args)
         vv=v.detach().clone();vv[3:]+=100
         b=flash_attn_varlen_prefixlm(q,k,vv,**args)
