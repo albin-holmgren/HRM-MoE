@@ -50,14 +50,30 @@ def parse_args():
     ap.add_argument('--min-delta',type=float,default=0.0)
     ap.add_argument('--seed', type=int, default=42)
     ap.add_argument('--stress-context', action='store_true', help='Fill each prefix to the context limit for a kernel/memory stress test, not quality training')
+    ap.add_argument('--check-only', action='store_true', help='Validate the run bounds and exit before importing torch or reading the corpus, so a planned invocation can be replayed for free')
     return ap.parse_args()
 
 def main():
     a = parse_args()
-    if not (0 < a.steps <= a.schedule_steps and a.minutes > 0 and a.checkpoint_every > 0):
+    # The step cap and the schedule length are independent on purpose. A wall-clock-bounded
+    # run sets the cap above what the clock can reach and sizes the schedule to the step count
+    # it actually expects, so the cap may legitimately exceed the schedule.
+    if not (a.steps > 0 and a.schedule_steps > 0 and a.minutes > 0 and a.checkpoint_every > 0):
         raise ValueError('Invalid step/time bounds')
     if a.early_stop_patience < 0 or a.eval_every <= 0 or a.min_delta < 0:
         raise ValueError('Invalid validation controls')
+    if a.check_only:
+        # Exits before the torch import and before any corpus read, so a whole plan can be
+        # replayed through this validator without provisioning or paying for a GPU. It checks
+        # the same static bounds the run itself would enforce on the way in.
+        cfg = json.loads(a.config.read_text())
+        if a.batch_tokens < cfg['max_seq_len']:
+            raise ValueError('batch-tokens must be at least max_seq_len')
+        print(json.dumps({'check_only':'pass','steps':a.steps,'schedule_steps':a.schedule_steps,
+            'minutes':a.minutes,'batch_tokens':a.batch_tokens,'checkpoint_every':a.checkpoint_every,
+            'eval_every':a.eval_every,'early_stop_patience':a.early_stop_patience,'config':str(a.config),
+            'max_seq_len':cfg['max_seq_len']}))
+        return
     if a.device == 'cpu':
         os.environ['NORD_REFERENCE_ATTENTION'] = '1'
     elif os.environ.get('NORD_REFERENCE_ATTENTION') == '1':
