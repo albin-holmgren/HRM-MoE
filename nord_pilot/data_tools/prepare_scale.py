@@ -75,6 +75,11 @@ NEEDED_COLUMNS = ("text", "url", "language_score")
 BAND_MULTIPLIERS = np.array([0x9E3779B97F4A7C15, 0xC2B2AE3D27D4EB4F,
                              0x165667B19E3779F9, 0x27D4EB2F165667C5], dtype=np.uint64)
 MAX_BAND_GROUP = 2000
+# Far less than the raw text a shard holds: rejections, exact duplicates and near
+# duplicates all remove text, so a shard's raw tokens overstate the candidate tokens it
+# yields. Sizing the per-shard share without this correction makes a large target fall
+# short after the shard list is exhausted.
+HARVEST_YIELD = 0.7
 
 
 def sha(x):
@@ -431,6 +436,9 @@ def harvest(source, shards, revision, corpus, target_candidate_tokens,
                 seen_bytes += metadata.row_group(need).total_byte_size
                 need += 1
             first = 0 if need >= groups else random.Random(sha(filename)[:12]).randrange(groups - need + 1)
+            print(json.dumps({"source": source["name"], "fetching": filename.rsplit("/", 1)[-1],
+                              "row_groups": need, "est_raw_tokens": int(seen_bytes / APPROX_BYTES_PER_TOKEN)}),
+                  flush=True)
             for g in range(first, first + need):
                 if stop.is_set():
                     break
@@ -465,9 +473,18 @@ def harvest(source, shards, revision, corpus, target_candidate_tokens,
             # Fan out only as widely as the missing tokens can keep busy. A row group is
             # ~250k tokens, so asking twelve shards for 30k tokens each would download
             # twelve row groups to keep one shard's worth of text.
+            #
+            # The per-shard budget is capped by the remaining shard supply, not just by the
+            # fanout. Without that cap a multi-billion-token target asks each of the first
+            # w shards for more tokens than a shard holds, so every fetch reads a whole
+            # shard, the corpus is drawn from a handful of shards instead of the full
+            # stratified set, and almost every row group is downloaded before any output
+            # appears. The cap keeps each round a bounded number of row groups and spreads
+            # the corpus across the shard list in the order the source returns it.
             fanout = max(1, min(workers, len(shards) - shards_done,
                                 -(-remaining // ROW_GROUP_TOKENS)))
-            token_budget = max(ROW_GROUP_TOKENS, remaining // fanout)
+            share = int(-(-remaining // (max(1, len(shards) - shards_done) * HARVEST_YIELD)))
+            token_budget = max(ROW_GROUP_TOKENS, min(remaining // fanout, share))
             batch = shards[shards_done:shards_done + fanout]
             min_fetch = max(1 << 18, int(token_budget * APPROX_BYTES_PER_TOKEN / 2))
             for filename, rows, bytes_, groups, rows_read, raw in pool.map(
