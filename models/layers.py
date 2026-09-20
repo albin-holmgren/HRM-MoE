@@ -9,11 +9,18 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from models.common import trunc_normal_init_, unwrap_tensor
-from models.flash_attention_prefixlm_v2 import flash_attn_varlen_prefixlm
+if os.environ.get("NORD_REFERENCE_ATTENTION") == "1":
+    from nord_pilot.reference_attention import flash_attn_varlen_prefixlm
+else:
+    from models.flash_attention_prefixlm_v2 import flash_attn_varlen_prefixlm
 from models.moe_cutlass_grouped_gemm import cutlass_grouped_linear
 from models.moe_profile import record_moe_profile_phase
 from models.moe_triton_grouped_gemm import triton_grouped_linear
-from flash_attn_interface import flash_attn_with_kvcache
+if os.environ.get("NORD_REFERENCE_ATTENTION") == "1":
+    def flash_attn_with_kvcache(**kwargs):
+        raise RuntimeError("Reference attention does not implement KV caching")
+else:
+    from flash_attn_interface import flash_attn_with_kvcache
 
 
 Carry = dict[str, Any]

@@ -929,3 +929,13 @@ AIME25 Majority Voting（百分比）：
 - HF model card 已经使用上述 epoch4 AIME 结果；GitHub README 仍保留 “AIME for MoE
   epoch 4 is still running” 的旧说明和 epoch3 AIME 数值。已将 README 同步为
   HRM-MoE 64x8 epoch4 结果。
+
+## 2026-09-20 Nord / Verda 技术试验准备（未启动 GPU）
+
+- 新增 `nord_pilot/`，使用上游 HRM H/L 与 MoE 模块；单 GPU，不使用 FSDP。
+- GPU 配置参数总数 94,404,608，unique active 56,655,872；8 experts / top-2，H=2 / L=3。
+- 本地 CPU 数学参考测试：12 steps 与 6+6 fresh-process resume 完全一致，62 tensors，max_abs_difference=0。
+- train loss 从 10.7648 降至 10.2287；export reload 与 generation 成功。仅为技术 fixture，不代表模型能力。
+- PrefixLM mask isolation、配置变更拒绝、覆盖保护及 mocked Verda guard tests 通过。
+- CUDA/FA3/Triton equivalence、H100 throughput、GPU memory 和 live API cleanup 尚未验证；未租用 GPU。
+- 已固定公开容器 AMD64 digest，测试窗口为 instance creation 后两小时，估算 $20 停止 / $25 预算。
