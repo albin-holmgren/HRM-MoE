@@ -520,3 +520,5 @@ GPU, distributed, FA3, and FSDP2 behavior should be validated through rjob.
 - Packed FA3 PrefixLM requires prefix_lens with numseqs+1 entries and a terminal zero; the shifted cumulative lengths use this sentinel. CPU references must enforce the same metadata contract.
 
 - Single-device autocast does not cast the custom Triton expert input. Pilot runner explicitly casts MoE boundary activations to BF16 in a pre-hook while retaining FP32 master weights/residuals; apply the same setup on export reload.
+
+- The first H100 pilot at revision b8aa07d passed native kernel parity, exact 213-tensor recovery and export, but 200 steps overfit the tiny fixture (validation 1.7249 -> 2.1436). Preserve the strict failure; technical learning is not product quality. Retain an earlier export and use best-checkpoint selection/early stopping with real validation data for subsequent work.

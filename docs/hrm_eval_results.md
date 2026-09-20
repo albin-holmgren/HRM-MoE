@@ -945,3 +945,14 @@ AIME25 Majority Voting（百分比）：
 - Verda H100 首次 native gate 在训练前发现 pilot prefix_lens 少 terminal zero sentinel。已修复 train/infer/gate metadata，并令 CPU reference 同样检查此约束；没有修改 attention kernel。
 
 - 第二次 H100 gate：native FA3 和 Triton expert forward/backward reference comparison 通过。完整模型 evaluation 发现 autocast 未覆盖 custom Triton FP32 activation；runner/infer 加入明确 BF16 MoE input boundary，保留 FP32 master weights/residual。
+
+## 2026-09-20 Verda H100 首次技术试验结果
+
+- 使用 1x H100 80GB、1H100.80S.30V / FIN-01，GPU $3.348/h，150 GiB OS $0.0411/h。代码运行 revision b8aa07d。
+- native FA3 与 Triton experts forward/backward reference tests 通过；94,404,608 参数模型完成 200 steps，没有 NaN 或 OOM，8 experts 均有 token。
+- 40 steps uninterrupted vs 20+20 fresh-process resume：213 tensors 完全一致，max_abs_difference=0。export reload/generation 与 2048 context stress 通过。
+- 40-step validation loss 11.118262 -> 1.724889；继续到 200 steps 后 validation loss 上升到 2.143613，而 training loss 降至 0.0000308902。最终 validation gate FAILED，不能标为 full pass，也不能视为产品能力证据。
+- 160-step continuation input throughput 16,304.74 tokens/s（仅 training compute），含 checkpoint I/O 的 wall time 91.81s / 324,422 tokens；peak allocated memory 3,958,311,936 bytes。长序列 stress throughput 15,252.17 input tokens/s，不能外推成真实语料学习效率。
+- 保留 step40 export 与 step200 full checkpoint/export。后续训练应使用真实去重语料、完整 held-out evaluation、best-checkpoint selection 和 early stopping；此轮不继续消耗预算调 synthetic fixture。
+
+- 清理完成：28 文件 / 2,265,944,391 bytes 已下载并 SHA-256 全匹配；step40/200 exports 本地加载检查 finite。GPU 删除确认、active instances=[]、active volumes=[]；OS volume soft-deleted（96h 可恢复），temporary SSH/API credentials 已撤销。余额从 $25 到 $23.30545（console $23.31），当前扣费 $1.69455，可能另有未使用预付时间退款。

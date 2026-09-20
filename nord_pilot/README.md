@@ -1,6 +1,14 @@
 # Nord HRM + MoE: first Verda technical test
 
-**Prepared, locally tested, not GPU-validated. No compute purchased.**
+**Executed on Verda H100 on 2026-09-20. Overall validation gate FAILED due to fixture overfitting.**
+
+Native FA3/Triton checks, 200 training steps, exact 213-tensor resume, exported-model
+reload and the 2,048-token stress test passed. Held-out fixture loss improved from
+11.1183 to 1.7249 at step 40, then worsened to 2.1436 at step 200. Preserve this
+failure; it is not a sellable model or a full pass. The step-40 export and final
+checkpoint are saved separately. The runtime was PyTorch 2.11.0+cu128 / CUDA 12.8
+on one NVIDIA H100 80GB. See the accompanying first-test results report for costs
+and cleanup confirmation.
 
 This package uses the actual upstream HRM recurrent modules and MoE implementation,
 with a separate single-GPU runner. It does not use pretrained weights. It is a
@@ -51,7 +59,10 @@ FSDP; this test does not establish distributed/FSDP recovery.
 
 The only upstream model edit is explicit `NORD_REFERENCE_ATTENTION=1` selection for
 local CPU mathematical tests. GPU runs refuse that mode and use native FA3/Triton.
-CPU tests are not evidence that those GPU kernels work.
+CPU tests alone are not evidence that those GPU kernels work. They were subsequently
+checked on the H100 as reported above. The single-device runner explicitly casts
+MoE boundary activations to BF16, preserving FP32 master weights and residuals.
+Packed prefix lengths include the terminal zero required by native FA3.
 
 ## Local verification (already performed)
 
@@ -67,7 +78,8 @@ bash nord_pilot/launch_verda.sh
 The local test uses a tiny 4,334,592-parameter HRM-MoE with the same recurrence/routing
 pattern. It verifies exact fresh-process recovery and export, prefix-mask isolation,
 learning, configuration mismatch rejection and overwrite protection. Provider requests
-are mocked in watchdog tests; no live delete action has been performed.
+are mocked in watchdog unit tests; real deployment and cleanup are tracked in the
+first-test results report.
 
 ## Verda deployment prerequisites
 
@@ -124,7 +136,7 @@ instance UUID/hostname and single-H100 shape. It mounts only the source/output t
 uses the pinned AMD64 container digest in `image.txt`, disables container networking,
 and runs no package installation during the test. Missing runtime dependencies fail
 at the kernel gate rather than starting training. The public image manifest/digest
-was verified; its CUDA runtime has not been executed locally on this Mac.
+was verified; its CUDA runtime was executed on the Verda H100, not locally on this Mac.
 
 ## Billing stop and recovery
 
