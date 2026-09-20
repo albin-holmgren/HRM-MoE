@@ -34,6 +34,16 @@ child_minutes=${6:-4}
 gate=(--device cuda --config "$config" --data-dir "$data" --batch-tokens 2048 --minutes "$child_minutes" \
   --schedule-steps "$schedule_steps" --eval-every 5 --checkpoint-every 10 --early-stop-patience 0 --valid-records 256)
 
+# Batch size is the one knob that converts the wall-clock budget directly into learning. This
+# run is stopped by the clock, so input tokens per second is what decides how many updates the
+# money buys, and the earlier pilot measured the rate at only 0.87% of H100 peak because one
+# maximum-length record per step leaves the GPU launch-bound. A larger batch should lift that
+# rate, but it has to be measured on the hardware rather than assumed, so the probe runs first
+# and trains the real run with whatever it selects. The 2048 batch the pilot already validated
+# is the fallback if every candidate fails.
+gate_batch=2048
+train_batch=$gate_batch
+
 # Full schedule. It initializes from the same step-0 weights the baseline holds, so the
 # before/after comparison is against exactly the weights this run started from instead of a
 # half-trained checkpoint.
@@ -42,15 +52,12 @@ gate=(--device cuda --config "$config" --data-dir "$data" --batch-tokens 2048 --
 # The step cap is the ceiling the wall clock is not expected to reach; the schedule is sized
 # to the step count the run is expected to complete inside the minute budget, so the two are
 # deliberately different numbers.
-train=(--device cuda --config "$config" --data-dir "$data" --batch-tokens 2048 --minutes "$minutes" \
-  --schedule-steps "$schedule_steps" --eval-every 250 --checkpoint-every 500 --early-stop-patience 4 --min-delta .005 \
-  --valid-records 1024 --init-export "$out/initial-export.pt")
-
 plan=(
+  "python nord_pilot/batch_probe.py --config $config --data-dir $data --out $out/batch-probe --steps 8 --minutes 0.15 --child-timeout 60 --schedule-steps $schedule_steps"
   "python nord_pilot/run.py ${gate[*]} --out $out/full --steps 20 --save-initial-export $out/initial-export.pt"
   "python nord_pilot/run.py ${gate[*]} --out $out/resumed --steps 10"
   "python nord_pilot/run.py ${gate[*]} --out $out/resumed --steps 20 --resume $out/resumed/latest.pt"
-  "python nord_pilot/run.py ${train[*]} --out $out/trained --steps $steps"
+  "python nord_pilot/run.py --device cuda --config $config --data-dir $data --batch-tokens $train_batch --minutes $minutes --schedule-steps $schedule_steps --eval-every 250 --checkpoint-every 500 --early-stop-patience 4 --min-delta .005 --valid-records 1024 --init-export $out/initial-export.pt --out $out/trained --steps $steps"
 )
 if [[ "${NORD_PLAN_ONLY:-0}" == 1 ]]; then
   printf '%s\n' "${plan[@]}"
@@ -63,6 +70,20 @@ test -f "$data/tokenizer.json" && test -f "$data/train.jsonl" && test -f "$data/
 mkdir -p "$out"
 
 python -m nord_pilot.gpu_gate | tee "$out/kernel-gate.json"
+
+# Measured, then read back. The probe logs every candidate, so the batch actually used is
+# visible in the artifacts rather than only in the choice it produced.
+python nord_pilot/batch_probe.py --config "$config" --data-dir "$data" --out "$out/batch-probe" \
+  --steps 8 --minutes 0.15 --child-timeout 60 --schedule-steps "$schedule_steps" \
+  | tee "$out/batch-probe.log"
+if [[ -f "$out/batch-probe/chosen-batch.txt" ]]; then
+  train_batch=$(cat "$out/batch-probe/chosen-batch.txt")
+fi
+echo "Training batch size: $train_batch"
+
+train=(--device cuda --config "$config" --data-dir "$data" --batch-tokens "$train_batch" --minutes "$minutes" \
+  --schedule-steps "$schedule_steps" --eval-every 250 --checkpoint-every 500 --early-stop-patience 4 --min-delta .005 \
+  --valid-records 1024 --init-export "$out/initial-export.pt")
 
 python nord_pilot/run.py "${gate[@]}" --out "$out/full" --steps 20 --save-initial-export "$out/initial-export.pt" | tee "$out/full.log"
 python nord_pilot/run.py "${gate[@]}" --out "$out/resumed" --steps 10 | tee "$out/first-half.log"
