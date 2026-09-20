@@ -584,11 +584,13 @@ GPU, distributed, FA3, and FSDP2 behavior should be validated through rjob.
 - `preflight.py` indexes and decodes the staged corpus with the trainer's own `JsonlCorpus`
   on CPU for free; 2M train / 40k valid records index in 1.2 s at 0.13 GB peak RSS. Only
   trust its memory number after the macOS/linux `ru_maxrss` unit fix (bytes vs kilobytes).
-- Budget reality for the scaled run: a 25-minute window is roughly 15-25M tokens, about 3-4
-  passes over the 8M-token staged validation split. `cost_model.py --plan` says a full
-  2.81B-token pass at 150M-260M parameters is about $152-304 of H100 time, so the scaled
-  run is a fraction of the eventual budget and is meant to be spent once, then reviewed.
-- Verda credentials do not exist on this machine and the Codex desktop app refused the
-  request, so the paid steps cannot run unattended. `deploy.py` needs `credentials.json`
-  (mode 600) in `work/verda-scale-private/`; the guard rejects any file that is group- or
-  world-readable, and the packaging step excludes the credential from the upload bundle.
+- Budget reality, corrected by measurement (2026-09-21). The earlier $152-304 figure for a
+  full 2.81B-token pass came from the 69M run's 17,168 tok/s, which was launch-bound: one
+  maximum-length record per step. The batch probe on the paid H100 measured 110,318 tok/s at
+  batch 32,768 (12.63% MFU) versus 6,058 tok/s at batch 2,048, so `cost_model.py --plan` now
+  puts a full 2.81B-token pass at about $24 flat/$24 sqrt at every size in the family. Batch
+  size, not parameter count, was setting the price. Treat $24-ish per full pass as the working
+  number and re-measure before trusting it at a new size.
+- Paid steps run unattended through `work/verda-scale-private/`, which holds the Verda
+  `credentials.json` (mode 600, never bundled or printed). The guard rejects any credential
+  file that is group- or world-readable, and the packaging step excludes it from the upload.

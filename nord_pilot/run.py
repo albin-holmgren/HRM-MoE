@@ -5,12 +5,14 @@ import argparse
 import contextlib
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import random
 import signal
 import sys
 import time
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT.parent))
@@ -38,6 +40,9 @@ def parse_args():
     ap.add_argument('--out', type=Path, required=True)
     ap.add_argument('--steps', type=int, default=40)
     ap.add_argument('--schedule-steps', type=int, default=200)
+    ap.add_argument('--lr', type=float, default=2e-4, help='peak learning rate; the schedule decays from here')
+    ap.add_argument('--lr-warmup-frac', type=float, default=0.02, help='linear warmup as a fraction of schedule-steps')
+    ap.add_argument('--lr-min-ratio', type=float, default=0.1, help='cosine floor as a fraction of --lr')
     ap.add_argument('--resume', type=Path)
     ap.add_argument('--init-export', type=Path, help='Trusted compatible export used only to initialize a fresh optimizer/run')
     ap.add_argument('--save-initial-export',type=Path,help='Write a weights-only export of the initialization before the first update; gives an honest before/after comparison for held-out scoring instead of reusing a trained checkpoint as the baseline')
@@ -62,6 +67,8 @@ def main():
         raise ValueError('Invalid step/time bounds')
     if a.early_stop_patience < 0 or a.eval_every <= 0 or a.min_delta < 0:
         raise ValueError('Invalid validation controls')
+    if a.lr <= 0 or not 0 <= a.lr_warmup_frac < 1 or not 0 <= a.lr_min_ratio <= 1:
+        raise ValueError('Invalid learning-rate controls')
     if a.check_only:
         # Exits before the torch import and before any corpus read, so a whole plan can be
         # replayed through this validator without provisioning or paying for a GPU. It checks
@@ -69,7 +76,8 @@ def main():
         cfg = json.loads(a.config.read_text())
         if a.batch_tokens < cfg['max_seq_len']:
             raise ValueError('batch-tokens must be at least max_seq_len')
-        print(json.dumps({'check_only':'pass','steps':a.steps,'schedule_steps':a.schedule_steps,
+        print(json.dumps({'check_only':'pass','steps':a.steps,'schedule_steps':a.schedule_steps,'lr':a.lr,
+            'lr_warmup_frac':a.lr_warmup_frac,'lr_min_ratio':a.lr_min_ratio,
             'minutes':a.minutes,'batch_tokens':a.batch_tokens,'checkpoint_every':a.checkpoint_every,
             'eval_every':a.eval_every,'early_stop_patience':a.early_stop_patience,'config':str(a.config),
             'max_seq_len':cfg['max_seq_len']}))
@@ -114,7 +122,24 @@ def main():
         initialization={'kind':'weights_only_export','parent_step':parent.get('step'),'parent_sha256':digest(a.init_export)}
         if not a.resume:model.load_state_dict(parent['model'])
         del parent
-    optim = AdamATan2(model.parameters(), lr=2e-4, ema=0.999)
+    optim = AdamATan2(model.parameters(), lr=a.lr, ema=0.999)
+    # Peak-rate schedule shared by the loop and the resume gate. Both the learning rate and
+    # the backprop depth are pure functions of `step` and the run's fixed schedule length, so
+    # a 20-step run and a 10+10 resume see the same values at every step. Upstream already
+    # provides both pieces in pretrain.py (linear-warmup cosine) and the model itself
+    # (compute_train_extra_args); this runner previously hardcoded lr=2e-4 and bp_steps=5 and
+    # never called them, which is why --schedule-steps had no effect on training.
+    lr_warmup_steps = int(round(a.schedule_steps * a.lr_warmup_frac))
+    def learning_rate_at(step_now):
+        if lr_warmup_steps > 0 and step_now <= lr_warmup_steps:
+            return a.lr * min(1.0, step_now / lr_warmup_steps)
+        decay_steps = max(1, a.schedule_steps - lr_warmup_steps)
+        progress = min(1.0, max(0.0, (step_now - lr_warmup_steps) / decay_steps))
+        return a.lr * (a.lr_min_ratio + (1 - a.lr_min_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress)))
+    def bp_steps_at(step_now):
+        # Delegates to the model's own warmup so the pilot and upstream cannot drift apart.
+        return model.compute_train_extra_args(
+            SimpleNamespace(step=step_now, total_steps=a.schedule_steps))['bp_steps']
     parameter_count = sum(p.numel() for p in model.parameters())
     # Build the corpus first: indexing the files also hashes them, which the fingerprint
     # needs. Hashing separately would read every byte of train.jsonl a second time.
@@ -129,6 +154,7 @@ def main():
        'train_sha256':corpus.digests['train'], 'valid_sha256':corpus.digests['valid'],
        'early_stop_patience':a.early_stop_patience,'eval_every':a.eval_every,'min_delta':a.min_delta,
        'batch_tokens':a.batch_tokens,'schedule_steps':a.schedule_steps,'seed':a.seed,'device':a.device,
+       'lr':a.lr,'lr_warmup_frac':a.lr_warmup_frac,'lr_min_ratio':a.lr_min_ratio,
        'valid_records':a.valid_records,
        'records_source_sha256':digest(ROOT/'data_tools/records.py'),'source_sha256':digest(__file__), 'reference_sha256':digest(ROOT/'reference_attention.py'), 'torch_version':str(torch.__version__), 'stress_context':a.stress_context,
        'initialization':initialization}
@@ -177,21 +203,24 @@ def main():
         return batch, to(labels).long(), start+count
     def autocast():
         return torch.autocast('cuda',dtype=torch.bfloat16) if a.device=='cuda' else contextlib.nullcontext()
-    def loss_at(batch, labels, training):
+    def loss_at(batch, labels, training, bp_steps):
         ctx={'aux_losses':[],'expert_counts':[]}
         with autocast():
-            _, logits=model(None,batch,moe_context=ctx,bp_steps=5)
+            _, logits=model(None,batch,moe_context=ctx,bp_steps=bp_steps)
             ce=F.cross_entropy(logits.float(),labels,ignore_index=-100)
             aux=torch.stack(ctx['aux_losses']).mean() if ctx['aux_losses'] else ce.new_zeros(())
             loss=ce+cfg['moe_router_aux_loss_coef']*aux
         return loss,ce,ctx
     def evaluate():
         model.eval()
+        # Evaluation uses the deepest backprop depth the schedule reaches, so the loss does
+        # not silently improve just because a shallow-warmup step was measured.
+        eval_bp_steps = bp_steps_at(a.schedule_steps)
         total_loss=0.0;total_targets=0;offset=0
         with torch.no_grad():
             while offset < valid_total:
                 b,y,offset=batch_at('valid',offset,a.batch_tokens,valid_total-offset)
-                _,ce,_=loss_at(b,y,False)
+                _,ce,_=loss_at(b,y,False,eval_bp_steps)
                 n=int((y!=-100).sum());total_loss+=float(ce)*n;total_targets+=n
         model.train()
         result=total_loss/total_targets
@@ -243,7 +272,9 @@ def main():
         if a.device=='cuda': torch.cuda.synchronize()
         t=time.monotonic()
         model.train(); optim.zero_grad(set_to_none=True)
-        loss,ce,ctx=loss_at(b,y,True)
+        step_lr=learning_rate_at(step)
+        for group in optim.param_groups: group['lr']=step_lr
+        loss,ce,ctx=loss_at(b,y,True,bp_steps_at(step))
         if not torch.isfinite(loss): raise RuntimeError('Nonfinite loss; retaining last good checkpoint')
         loss.backward()
         norm=torch.nn.utils.clip_grad_norm_(model.parameters(),1.0,error_if_nonfinite=True)
@@ -253,7 +284,7 @@ def main():
         dt=time.monotonic()-t
         times.append(dt); losses.append(float(ce.detach())); tokens+=len(y)
         counts=torch.stack(ctx['expert_counts']).sum(0).tolist()
-        metric={'step':step,'loss':losses[-1],'seconds':dt,'input_tokens':len(y),
+        metric={'step':step,'loss':losses[-1],'lr':step_lr,'seconds':dt,'input_tokens':len(y),
              'supervised_tokens':int((y!=-100).sum()),'grad_norm':float(norm),'expert_counts':counts}
         with (a.out/'metrics.jsonl').open('a') as f:f.write(json.dumps(metric)+'\n')
         if step % 10==0:print(json.dumps(metric),flush=True)

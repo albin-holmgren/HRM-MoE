@@ -5,20 +5,33 @@ assumptions are printed so they can be challenged. It exists because the earlier
 planning estimates quoted parameter counts and dollar figures without connecting
 them to the recurrence the model actually executes.
 
-Key measured fact (nord-long H100 run, 2026-09-20): 69,238,784 parameters, batch of
-2,048 tokens, bp_steps=5, 17,167.84 input tokens/s compute-only. That is 0.87% of the
-H100's dense bf16 peak, so wall clock at that batch size is dominated by 32 sequential
-small operations and kernel launch overhead, not by arithmetic. Both the flat and the
-linear extrapolations below are printed: the truth lies between them, and only a live
-run with a realistic batch size can settle it.
+Two measured facts, both on one Verda H100 SXM5 (2026-09-20):
+
+1. 69,238,784 parameters, batch 2,048 tokens, 17,167.84 tok/s. That is 0.87% of the
+   H100's dense bf16 peak: wall clock is dominated by 32 sequential small operations
+   and kernel-launch overhead, not by arithmetic.
+2. 187,219,968 parameters (h768), batch 2,048 -> 6,057.78 tok/s (0.69% MFU), and
+   batch 32,768 -> 110,317.79 tok/s (12.63% MFU). A 14.5x lift from batch size alone,
+   which is why the pilot wasted most of its dollars: the batch, not the FLOPs, set the
+   cost. The throughput rate, not the parameter count, is the thing to fix.
+
+The default reference is the large-batch point, since that is the batch a real run
+should use. Flat, sqrt, and linear extrapolations are all printed: at 12.63% MFU there
+is still headroom above the arithmetic floor, so the truth sits between flat and linear.
 """
 import argparse
 import json
 
-MEASURED_TOKENS_PER_SECOND = 17167.84
-MEASURED_CONFIG = dict(n_layers=8, half_layers=True, hidden_size=512, num_heads=4,
-                       moe_num_experts=8, moe_top_k=2, moe_intermediate_size=512,
+# Reference point used for scaling: the 187M h768 model at the batch size a real run
+# should use. swap to the 69M point with --reference small.
+MEASURED_TOKENS_PER_SECOND = 110317.79
+MEASURED_CONFIG = dict(n_layers=8, half_layers=True, hidden_size=768, num_heads=6,
+                       moe_num_experts=8, moe_top_k=2, moe_intermediate_size=768,
                        H_cycles=2, L_cycles=3, vocab_size=32768)
+SMALL_BATCH_TOKENS_PER_SECOND = 17167.84
+SMALL_BATCH_CONFIG = dict(n_layers=8, half_layers=True, hidden_size=512, num_heads=4,
+                          moe_num_experts=8, moe_top_k=2, moe_intermediate_size=512,
+                          H_cycles=2, L_cycles=3, vocab_size=32768)
 H100_BF16_TFLOPS = 989.0
 VERDA_H100_USD_PER_HOUR = 3.348
 
@@ -62,8 +75,13 @@ def main():
     parser.add_argument('--budget', type=float, default=500.0, help='budget in USD for --plan')
     parser.add_argument('--overhead-per-run-usd', type=float, default=2.5,
                         help='one gate + recovery + held-out scoring pass, roughly a few minutes of H100')
+    parser.add_argument('--reference', choices=('large-batch', 'small-batch'), default='large-batch',
+                        help='which measured throughput point to scale from')
     args = parser.parse_args()
 
+    global MEASURED_CONFIG, MEASURED_TOKENS_PER_SECOND
+    if args.reference == 'small-batch':
+        MEASURED_CONFIG, MEASURED_TOKENS_PER_SECOND = SMALL_BATCH_CONFIG, SMALL_BATCH_TOKENS_PER_SECOND
     reference_flops = train_flops_per_token(MEASURED_CONFIG)
     reference_mfu = 100 * MEASURED_TOKENS_PER_SECOND * reference_flops / 1e12 / H100_BF16_TFLOPS
     rows = []
@@ -80,9 +98,10 @@ def main():
         params = parameter_count(cfg)
         flops = train_flops_per_token(cfg)
         ratio = flops / reference_flops
-        # Flat: throughput unchanged, because the measured batch was latency-bound.
-        # Linear: throughput falls as 1/FLOPs, i.e. the run is fully compute-bound.
-        # Sqrt: a middle case that assumes per-step time grows with sqrt(FLOPs).
+        # Flat: throughput unchanged, i.e. the run stays launch/latency-bound even as the
+        #   model grows. Linear: throughput falls as 1/FLOPs, a fully compute-bound run.
+        # Sqrt: a middle case where per-step time grows with sqrt(FLOPs); closest to truth
+        #   now that the large batch put the reference at 12.63% MFU, above the floor.
         def usd(tokens_per_second):
             return args.rate * args.corpus_tokens / tokens_per_second / 3600
         rows.append(dict(
@@ -119,8 +138,8 @@ def main():
         return
     print(f'measured reference: {layer_passes(MEASURED_CONFIG)} sequential layer-passes/token, '
           f'{reference_flops/1e6:.0f} MFLOP/token train')
-    print(f'  {MEASURED_TOKENS_PER_SECOND:,.0f} tok/s -> {reference_mfu:.2f}% of H100 bf16 peak'
-          f'  => cost grows slower than FLOPs when the batch stays small')
+    print(f'  reference {args.reference}: {MEASURED_TOKENS_PER_SECOND:,.0f} tok/s -> '
+          f'{reference_mfu:.2f}% of H100 bf16 peak')
     print(f'  corpus {args.corpus_tokens/1e9:.2f}B train tokens at ${args.rate}/h\n'
           f"{'config':16s}{'params':>8s}{'passes':>8s}{'tok/param':>11s}{'$flat':>9s}{'$sqrt':>9s}{'$linear':>9s}")
     for row in rows:

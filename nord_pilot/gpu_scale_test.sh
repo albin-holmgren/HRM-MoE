@@ -20,9 +20,11 @@ unset NORD_REFERENCE_ATTENTION
 out=${1:?Pass a fresh output directory}
 config=${2:?Pass a config under nord_pilot/configs}
 data=${3:?Pass the built corpus directory}
-# A 25-minute window at this scale is roughly 15-25M tokens, i.e. thousands of steps, so the
-# step cap is set above what the clock allows and the wall clock does the stopping. The
-# learning-rate schedule is sized to the expected step count instead.
+# A 25-minute window at this scale is thousands of steps now that the batch probe lifted the
+# rate, so the step cap is set above what the clock allows and the wall clock does the
+# stopping. schedule-steps sizes the linear-warmup cosine the runner actually applies; set it
+# near the step count you expect the clock to reach, since a schedule longer than the run
+# leaves the final steps at a high learning rate.
 minutes=${4:-25}
 steps=${5:-20000}
 schedule_steps=${7:-8000}
@@ -49,9 +51,8 @@ train_batch=$gate_batch
 # half-trained checkpoint.
 # eval-every is 250 steps so validation is a small fraction of the wall clock rather than a
 # steady tax, and the final held-out score is bounded separately below.
-# The step cap is the ceiling the wall clock is not expected to reach; the schedule is sized
-# to the step count the run is expected to complete inside the minute budget, so the two are
-# deliberately different numbers.
+# The step cap is the ceiling the wall clock is not expected to reach; schedule-steps sets how
+# far the cosine decays and should track the step count the minute budget actually reaches.
 plan=(
   "python nord_pilot/batch_probe.py --config $config --data-dir $data --out $out/batch-probe --steps 8 --minutes 0.15 --child-timeout 60 --schedule-steps $schedule_steps"
   "python nord_pilot/run.py ${gate[*]} --out $out/full --steps 20 --save-initial-export $out/initial-export.pt"
