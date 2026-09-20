@@ -1016,3 +1016,14 @@ AIME25 Majority Voting（百分比）：
 - 30 文件 / 2,220,308,159 bytes 归档逐项 SHA-256 全匹配（archive sha256 3dabf9101a9fad0857569e29b3c0d77353431fc5ddde21441fcad760cdd76a82）；best-export.pt 与 export.pt 本地加载后 43 个 floating tensors 全部 finite。
 - 清理完成：GPU 实例删除、OS volume soft-deleted、active instances=[]、active volumes=[]、临时 SSH key 删除、本地 guard 退出。balance $22.90345 -> $19.51435（console $19.51），本轮扣费 $3.3891；相对 $25 的累计净扣费 $5.48565，未使用预付时间仍可能退款。
 - 临时 Cloud API credential `nord-long-test-20260920` 已在 console 删除，页面确认 "You currently have no cloud API keys"；本地 credentials.json、临时 SSH 私钥与 known_hosts 已删除。
+
+## 2026-09-20 大规模真实语料构建与流式训练改造（新增云支出 $0）
+
+- 使用 `nord_pilot/data_tools/prepare_scale.py` 通过 HTTP byte-range 读取 Parquet shard，运行 2 小时 26 分（8,777.9s），下载 53.24 GB，新增云/API 支出 $0。代码 revision `0b4ff72`，manifest `code_sha256` 与提交源码一致。
+- 候选 3,559,697 -> 保留 3,541,223。近重复与精确重复过滤在真实规模下生效（18,474 / 18,919 拒绝），另有 length 171,645、language 112,294、email 56,844、encoding 34,883 拒绝。
+- train 3,191,162 docs / 2,810,517,880 text tokens / 12,637,289 chunks / 2,813,709,042 supervised tokens；valid 176,227 docs / 156,171,603 tokens；test 173,834 docs / 151,100,475 tokens。train token 构成为 edu 1.509B、explanations 612M、math 401M、sv 289M。
+- **实际产出为 2.81B train tokens，未达到 5B 目标。** edu 的 shard 供给耗尽，math（64 shards）、explanations（104）、sv（20）被 `--shards-per-source` 与 source time budget 限制在加权目标之下。若要扩到 5B 以上，必须提高 shard 上限并重跑 2 小时级别的构建。
+- `verify_corpus.py` 已对该语料通过：跨 split doc-id 无泄漏、fresh test 逐字节一致、token id 全部在 32,768 词表内、无 control token、manifest 哈希全部匹配。该脚本原本把各 split 读入 Python list，18 GB 的 train.jsonl 导致 swap thrash 且无法完成，现已改为流式读取，RSS 稳定在 0.37 GB。
+- `nord_pilot/run.py` 原先把 train.jsonl/valid.jsonl 读入内存并逐条编码，对 1,260 万 chunk 不可能运行。新增 `nord_pilot/data_tools/streaming.py`（`JsonlCorpus`）：一次遍历同时建立行偏移索引与文件 sha256，按 `--seed` 生成训练置换，仅在取 batch 时解码单条记录；索引阶段顺带提供 resume fingerprint 所需的 digest，避免第二次读 18 GB。新增 `--valid-records` 用于限定评估规模。
+- 新增 7 项 streaming 测试，本地 35 项测试全部通过；`nord_pilot.test_local` 精确恢复门槛仍为 75 tensors、`max_abs_difference: 0.0`。真实语料实测：8.5s 建立 1,260 万条索引且 RSS 0.37 GB，解码 14,140 records/s，trainer 可直接在 `../real-data-scale` 上跑 3 steps。
+- 以上均为本地免费工作。下一步付费 GPU 预训练尚未执行，模型规模需先确认。

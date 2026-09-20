@@ -29,7 +29,32 @@ Dataset metadata lists ODC-By for these repositories. Keep attribution/provenanc
 
 ## Scaled corpus builder (`prepare_scale.py`, 2026-09-20)
 
-`prepare_scale.py` is the path for billions of tokens. It reads FineWeb-Edu, FineMath, Cosmopedia-v2 and FineWeb-2 Swedish Parquet shards over HTTP byte ranges, so a footer plus the needed row groups cost megabytes instead of the whole ~1.9-4.8 GB shard. Verified on a 10M-token smoke build: 0.16 GB downloaded for 14.2M tokens.
+`prepare_scale.py` is the path for billions of tokens. It reads FineWeb-Edu, FineMath, Cosmopedia-v2 and FineWeb-2 Swedish Parquet shards over HTTP byte ranges, so a footer plus the needed row groups cost megabytes instead of the whole ~1.9-4.8 GB shard. Verified first on a 10M-token smoke build (0.16 GB downloaded for 14.2M tokens), then on the 2026-09-20 production build.
+
+### 2026-09-20 scaled build (real numbers)
+
+Command (2 h 26 m wall, `$0` cloud spend, revision `0b4ff72`):
+
+```bash
+TOKENIZERS_PARALLELISM=true python -m nord_pilot.data_tools.prepare_scale \
+  --out ../real-data-scale --target-tokens 5000000000 --tokenizer-vocab 32768 \
+  --shards-per-source 1200 --tokenizer-docs 200000 --workers 12 \
+  --max-download-bytes 90000000000 --source-time-budget-s 10800
+```
+
+Result: 3,559,697 candidates -> 3,541,223 kept, 53.24 GB downloaded, 4,537,073,115 raw tokens read. Near-duplicate and exact-duplicate removals were live at scale (18,474 / 18,919 rejected), alongside 171,645 length, 112,294 language, 56,844 email and 34,883 encoding rejections.
+
+Split sizes (true BPE counts, not the 4-bytes-per-token streaming estimate):
+
+| Split | Documents | Text tokens | Chunks | Supervised tokens |
+| --- | --- | --- | --- | --- |
+| train | 3,191,162 | 2,810,517,880 | 12,637,289 | 2,813,709,042 |
+| valid | 176,227 | 156,171,603 | -- | -- |
+| test | 173,834 | 151,100,475 | 680,630 | 151,274,309 |
+
+Train token mix: edu 1.509B, explanations 612M, math 401M, sv 289M. **The build landed at 2.81B train tokens, not the 5B target.** Edu exhausted its 500-shard supply; math (64 shards), explanations (104) and sv (20) were capped below their weighted targets by `--shards-per-source` and the source time budget. Raise `--shards-per-source` and re-run to extend, or accept 2.81B.
+
+`verify_corpus.py` was run against this corpus and passes: no cross-split document-id leakage, fresh test byte-identical, all token ids inside the 32,768 vocabulary, no control tokens, all manifest hashes matching. It was rewritten to stream rows instead of loading splits as Python lists, because the 18 GB `train.jsonl` caused swap thrash and the verifier never finished; resident memory is now flat at 0.37 GB.
 
 Run and verify:
 
