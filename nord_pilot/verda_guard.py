@@ -58,11 +58,13 @@ def main():
     p=argparse.ArgumentParser();p.add_argument('--instance',required=True);p.add_argument('--hostname',required=True)
     p.add_argument('--credentials',type=Path);p.add_argument('--state-dir',type=Path,required=True)
     p.add_argument('--storage-hourly',type=float,required=True);p.add_argument('--tax-fraction',type=float,required=True)
+    p.add_argument('--max-hours',type=float,default=2);p.add_argument('--stop-usd',type=float,default=20)
     p.add_argument('--execute',action='store_true');a=p.parse_args()
     payload=delete_payload(a.instance)
     if a.tax_fraction<0 or a.storage_hourly<0:raise ValueError('Rates must be nonnegative')
+    if not 0<a.max_hours<=2 or not 0<a.stop_usd<=20:raise ValueError('Guard bounds may only tighten the original limits')
     if not a.execute:
-        print(json.dumps({'mode':'dry-run','api_request':payload,'delete_at_hours_since_creation':2,'stop_at_estimated_usd':20,'hard_cash_target':25,'retained_volumes_still_billed':True}));return
+        print(json.dumps({'mode':'dry-run','api_request':payload,'delete_at_hours_since_creation':a.max_hours,'stop_at_estimated_usd':a.stop_usd,'hard_cash_target':25,'retained_volumes_still_billed':True}));return
     if a.credentials is None:raise ValueError('A private credentials file is required')
     api=API(a.credentials);info=api('GET','/instances/'+a.instance)
     if info is None:raise ValueError('Instance does not exist')
@@ -72,7 +74,7 @@ def main():
     while True:
         hours,cost=elapsed_cost(info,time.time(),a.storage_hourly,a.tax_fraction)
         (a.state_dir/'status.json').write_text(json.dumps({'hours':hours,'estimated_usd':cost,'checked_at':time.time()}))
-        if hours>=2 or cost>=20 or float(info['price_per_hour'])>3.5 or (a.state_dir/'finished').exists():break
+        if hours>=a.max_hours or cost>=a.stop_usd or float(info['price_per_hour'])>3.5 or (a.state_dir/'finished').exists():break
         time.sleep(15)
         try:
             fresh=api('GET','/instances/'+a.instance)

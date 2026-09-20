@@ -2,6 +2,9 @@
 
 ## Real-data rehearsal lessons (2026-09-20)
 
+- `gpu_real_test.sh` uses the packaged real corpus, 8,192-token vocabulary, full validation, 20 versus 10+10 exact recovery and a bounded 600-step continuation. Keep it separate from the historical fixture test.
+- Verda guard `--max-hours` and `--stop-usd` may only tighten the original two-hour/$20 limits. The real-data test uses one hour/$5, with independent local and remote guards, then verified artifact download before manual cleanup.
+
 - Pin dataset viewer x-revision against HF metadata and save page hashes. Cosmopedia seed_data can be merely the string fineweb; group by prompt hash instead. Hostname grouping is not full semantic or registered-domain decontamination.
 - Do not call Tokenizer.get_vocab_size() in a per-token loop: this installed tokenizers build copies the vocabulary. Read it once and pass the size to the encoder.
 - Raw pretraining is causal with a BOS-only prefix; EOS belongs only at actual document ends. Train the tokenizer on training documents only. Changing token IDs requires fresh model weights.

@@ -974,3 +974,8 @@ AIME25 Majority Voting（百分比）：
 - 1,188,864 参数 CPU HRM+MoE 完成 12 steps / 11,471 input tokens；完整 validation 1,070 chunks / 254 docs，loss 9.51158 -> 9.47015，wall 18.66s。best-export fresh-process reload 通过。18 个本地测试通过。这是数据管线测试，不是 94M/0.6B 能力测试。
 - 复用旧 pilot24 的 22 个 DeepSeek V4.1 Flash 历史 subprocess verified examples（20 train / 2 valid）；未重新执行其测试，未复制长 reasoning traces 到训练 target。
 - 另准备 50 个 high-reasoning teacher 请求和独立整数答案检查，未发送。按每条 1,000 input + 最多 4,096 output/reasoning tokens，direct API offpeak/peak 估算 $0.13038/$0.26076。建议 $1 上限未配置为账单限制。新增 API/Verda 费用为 0。
+# 2026-09-20 真实语料 GPU 测试准备
+
+- 已重新检查 Verda：balance=$23.92944，无 active instances/volumes，1H100.80S.30V 价格 $3.348/h 且有可用资源。
+- 计划 20 vs 10+10 精确恢复，随后最多 600 steps；新词表 8,192，保留完整 validation 与 best export。上限改为 1 小时或估算 $5，仍在原 $25 总预算内。
+- 6 项 mocked guard tests、shell syntax 与 tighter-bound dry run 通过；超过原上限的参数被拒绝。此处尚未宣称 GPU 测试通过。
