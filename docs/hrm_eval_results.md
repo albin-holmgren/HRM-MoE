@@ -979,3 +979,17 @@ AIME25 Majority Voting（百分比）：
 - 已重新检查 Verda：balance=$23.92944，无 active instances/volumes，1H100.80S.30V 价格 $3.348/h 且有可用资源。
 - 计划 20 vs 10+10 精确恢复，随后最多 600 steps；新词表 8,192，保留完整 validation 与 best export。上限改为 1 小时或估算 $5，仍在原 $25 总预算内。
 - 6 项 mocked guard tests、shell syntax 与 tighter-bound dry run 通过；超过原上限的参数被拒绝。此处尚未宣称 GPU 测试通过。
+
+## 2026-09-20 真实语料 H100 技术试验完成
+
+- 执行 revision `133a6de`，1x H100 80GB / FIN-01，GPU $3.348/h，加 150 GiB OS 估算 $0.0411/h。独立本地与远程 guard 限制 instance 创建后 1 小时或含 25% cushion 的估算 $5。
+- 使用自己的随机初始化 HRM + MoE：69,238,784 参数、8 experts / top-2、H=2 / L=3、8,192-token BPE。参数少于旧 94M fixture，原因是 embedding/head 词表缩小；本轮不是 0.6B 试验。
+- native FA3 和 Triton expert forward/backward gate 通过。20 uninterrupted vs 10+10 fresh-process resume：256 tensors，max_abs_difference=0。600 steps 完成，未出现 NaN/OOM，best step=600，8 experts 均有路由。
+- 全量 validation：254 docs / 1,070 chunks / 238,643 targets，初始 9.47600538644912 -> step20 7.769300394761605 -> step600 5.834325286113957。每 100 steps 选择 best，patience=3 未触发。
+- 最终 lineage 训练 1,163,066 input/target tokens；其中 step20->600 为 1,123,841 tokens / 69.67336s training compute / 149.34239s wall，compute-only 16,130.14 tokens/s，peak allocated 2,926,008,320 bytes。真实 chunks <=255 tokens，不能外推到 0.6B 或长 context。
+- 最终固定 untouched-test evaluation：234 docs / 917 chunks / 202,451 targets，initial step0 loss=9.468886645719211，best step600 loss=5.811926973610281。使用相同 native BF16 / bp_steps=5；test 未用于 checkpoint selection。
+- 六条固定 raw-text completions 均未给出有用正确答案，仍明显重复。例如 `2 + 3 =` 生成 `0.`。技术 gate PASS 与产品能力必须分开；没有 GPT-level 或可售质量证据，也没有证明此架构优于 dense baseline。
+- 未发送新 DeepSeek 请求，历史 22 条 teacher examples 未混入本轮训练。保存了完整测试脚本、原始 completion JSON、运行代码和精确数据；本轮不继续消耗预算进行无依据扩展。
+- 30 文件 / 2,216,555,603 bytes 下载后逐项 SHA-256 全匹配；step20 与 step600 exports 本地可加载，三份 export 的 43 个 state tensors 均 finite。完整 checkpoint 和原始输出归档至 `outputs/nord-real-h100-results/results.tar`，执行 source/data 单独保存。
+- GPU 删除及 150 GiB OS volume soft-delete 已确认，active instances=[] / active volumes=[]，临时 SSH key 删除，本地 guard 已退出。此时 balance $23.92944 -> $22.23489（console $22.23），本轮当前扣费 $1.69455，所有试验相对 $25 的累计净扣费 $2.76511；未使用预付时间仍可能退款，不能把当前扣费当作最终结算发票。
+- 临时 Cloud API credential 已撤销，console 明确显示 no cloud API keys；本地 credentials JSON 与临时 SSH private key 已删除。历史试验归档保持原样。

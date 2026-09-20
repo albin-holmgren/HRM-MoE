@@ -2,6 +2,10 @@
 
 ## Real-data rehearsal lessons (2026-09-20)
 
+- The 69,238,784-parameter real-data H100 run at `133a6de` passed 20 vs 10+10 exact recovery (256 tensors, zero difference) and 600-step training. Full validation improved 9.476005 -> 5.834325; untouched-test loss improved 9.468887 -> 5.811927. Six fixed completions remained repetitive/incorrect: this is a technical learning result, not usable chat or a GPT-level result.
+- Preserve execution source, tokenizer and corpus alongside full checkpoints. This runner fingerprints `schedule_steps` and rejects steps beyond it; the completed 600-step checkpoint cannot simply be resumed with a larger schedule. Plan any longer run or explicit weights-only continuation before renting the GPU, and never bypass the recovery fingerprint.
+- The real-data run used chunks of at most 255 input tokens packed into a 2,048-token batch. Its approximately 16.1k input tokens/s training-only rate is not a long-context, 0.6B-model or end-to-end throughput claim. The final lineage consumed 1,163,066 tokens, much less than the prepared corpus.
+
 - `gpu_real_test.sh` uses the packaged real corpus, 8,192-token vocabulary, full validation, 20 versus 10+10 exact recovery and a bounded 600-step continuation. Keep it separate from the historical fixture test.
 - Verda guard `--max-hours` and `--stop-usd` may only tighten the original two-hour/$20 limits. The real-data test uses one hour/$5, with independent local and remote guards, then verified artifact download before manual cleanup.
 
