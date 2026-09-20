@@ -1002,3 +1002,17 @@ AIME25 Majority Voting（百分比）：
 - `test-fresh.jsonl` 含 233 个新增 test docs / 934 chunks / 208,981 targets；与 base provenance、train、valid 的 doc overlap 均为 0。最大 chunk=254 tokens，所有 token id 在 8,192 vocabulary 内。
 - 下一轮计划最多 9,000 steps、约 17M training tokens（约两次 train token pass），每 1,000 steps 全量 validation，patience=3 / min_delta=.005；先做 20 vs 10+10 exact recovery，再做 fresh-test loss 和六条固定 completion。该设计仍是 69.2M 技术试验，不是 0.6B 或产品能力声明。
 - 本地 12 tests 通过；包含 weights-only initialization 后 fresh optimizer run、同 lineage exact resume、原有 75-tensor CPU recovery、data filters 和 grounding checks。GPU native gate 仍需在新 instance 上复测。
+
+## 2026-09-20 长训练 H100 续跑完成
+
+- 仍为 1x H100 80GB / FIN-01，GPU $3.348/h + 150 GiB OS 估算 $0.0411/h；独立本地/远程 guard 上限保持 1 小时或估算 $5。
+- 从已验证 step600 best export 用 `--init-export` 做 weights-only 续跑（严格校验 config、tokenizer SHA、parent SHA，fresh optimizer，后续 checkpoint 仍用完整 fingerprint 做 exact resume）。模型仍为 69,238,784 参数，不是 0.6B。
+- native FA3 forward/backward 与 Triton expert forward/backward gate 通过。20 uninterrupted vs 10+10 fresh-process resume：256 tensors，max_abs_difference=0。
+- 全量 validation 523 docs / 2,294 examples：step0 5.820466652873209 -> 1000 5.229724222139017 -> 2000 4.943159862998362 -> 3000 4.764988566759116 -> 4000 4.633450327707059 -> 5000 4.538907399691635 -> 6000 4.4636947475985975 -> 7000 4.3963100681904805 -> 8000 4.344534946534112 -> 9000 4.2976258240924405。每步都改善，patience=3 未触发，无 NaN/OOM/dead expert。
+- 9,000 steps 完成：input tokens 17,446,193，training 1,016.2133519900052s，compute-only 17,167.844691113238 tokens/s，peak allocated 2,926,266,368 bytes，wall 1,205.941144963s。summary.json：initial_valid_loss 5.849426845032922 / best 4.2976258240924405。
+- 全新 held-out fresh test（233 docs / 934 chunks / 208,981 targets，与 train/valid/旧 provenance doc overlap 均为 0）：initial step600 5.817625734647378 -> best step9000 4.274393826191885。test 未参与 checkpoint selection。
+- 六条固定 raw completion 仍不可用：`Stockholm is the capital of` 生成 "the United States. It is the most important part of the country." 后重复；`2 + 3 =` 输出 "3" 后进入无关重复；`Question: What is the capital of Sweden? Answer:` 只重复 "Answer:"。loss 下降不等于指令能力或可售质量，本轮没有 GPT-level 证据。
+- PASS.json 结论：`long_real_data_technical_pilot: pass`、`capability: not established`。
+- 30 文件 / 2,220,308,159 bytes 归档逐项 SHA-256 全匹配（archive sha256 3dabf9101a9fad0857569e29b3c0d77353431fc5ddde21441fcad760cdd76a82）；best-export.pt 与 export.pt 本地加载后 43 个 floating tensors 全部 finite。
+- 清理完成：GPU 实例删除、OS volume soft-deleted、active instances=[]、active volumes=[]、临时 SSH key 删除、本地 guard 退出。balance $22.90345 -> $19.51435（console $19.51），本轮扣费 $3.3891；相对 $25 的累计净扣费 $5.48565，未使用预付时间仍可能退款。
+- 临时 Cloud API credential `nord-long-test-20260920` 已在 console 删除，页面确认 "You currently have no cloud API keys"；本地 credentials.json、临时 SSH 私钥与 known_hosts 已删除。

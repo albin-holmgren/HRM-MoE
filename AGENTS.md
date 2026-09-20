@@ -541,3 +541,19 @@ GPU, distributed, FA3, and FSDP2 behavior should be validated through rjob.
 
 - Follow-up pilot validation must cover every held-out example once, weighted by target tokens. Persist best weights, patience counters and last evaluation step through resume; a stopped checkpoint must remain stopped. Selection uses fixed global evaluation steps to preserve split-run equivalence.
 - Audit changed familiar facts, unseen fact values and changed source IDs separately. Fixture-specific answer validation can repair citations or abstain but is not evidence of general reasoning or a production RAG verifier.
+
+- Long continuations should start from a verified best export with `--init-export`
+  (weights-only, fresh optimizer, strict config/tokenizer/parent-SHA validation) so
+  later checkpoints still carry the full exact-resume fingerprint. A 9,000-step run
+  over ~17M tokens stayed well inside the 1-hour/$5 guard, so the binding constraint
+  on longer schedules is budget, not single-H100 throughput.
+- Treat falling validation and held-out loss as a technical signal only. Across both
+  the 600-step and 9,000-step runs, raw completions stayed repetitive and wrong; never
+  present loss improvement as capability, and never call the 69.2M pilot a 0.6B model.
+- Verify a downloaded results archive against its remote SHA-256 before deleting the
+  instance, and re-load every exported checkpoint locally to confirm all floating
+  tensors are finite. The console Credentials page keeps rendering a stale grid after
+  a reload; only trust the rendered empty-state row when revoking temporary credentials.
+- Do not assume the browser debugger attaches to an existing console tab. Open a fresh
+  agent tab for Verda console work, and treat the temporary Cloud API key as revoked
+  only once the page shows "You currently have no cloud API keys".
