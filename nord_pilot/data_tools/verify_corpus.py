@@ -26,8 +26,17 @@ def digest(path):
     return accumulator.hexdigest()
 
 
-def load(path):
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+def stream(path):
+    """Yield parsed rows one at a time.
+
+    The earlier version built a Python list of every row. A real corpus holds millions of
+    chunks and train.jsonl alone is tens of gigabytes, so loading all three splits at once
+    exhausted the machine and the check never finished. Streaming keeps memory flat.
+    """
+    with path.open() as handle:
+        for line in handle:
+            if line.strip():
+                yield json.loads(line)
 
 
 def main():
@@ -40,57 +49,62 @@ def main():
     problems, notes = [], []
     manifest = json.loads((root / "manifest.json").read_text())
 
-    splits = {name: load(root / f"{name}.jsonl") for name in ("train", "valid", "test")}
-    fresh_path = root / "test-fresh.jsonl"
-    fresh = load(fresh_path) if fresh_path.exists() else None
+    names = ("train", "valid", "test")
+    paths = {name: root / f"{name}.jsonl" for name in names}
+    missing = [name for name in names if not paths[name].exists()]
+    for name in missing:
+        problems.append(f"{name}.jsonl is missing")
 
     # 1. A test document that also appears in train or valid makes every later test number
-    # meaningless, so group and document identity must both be disjoint.
-    for a, b in (("train", "valid"), ("train", "test"), ("valid", "test")):
-        shared_docs = {r["doc_id"] for r in splits[a]} & {r["doc_id"] for r in splits[b]}
-        if shared_docs:
-            problems.append(f"{a}/{b} share {len(shared_docs)} document ids")
-        split_groups = {r.get("group") for r in splits[a]}
-        # group keys are internal to the builder; the manifest records the policy
-    if manifest.get("split_policy") is None:
-        problems.append("manifest does not state a split policy")
-
-    # 2. Chunk format must match what the trainer reads.
-    for name, rows in splits.items():
-        if not rows:
-            problems.append(f"{name} is empty")
-            continue
-        for row in rows:
-            if not REQUIRED_KEYS.issubset(row):
-                problems.append(f"{name} row missing keys: {sorted(REQUIRED_KEYS - set(row))}")
-                break
-        longest = max(len(r["token_ids"]) for r in rows)
-        if longest > args.max_document_tokens:
-            problems.append(f"{name} has a chunk of {longest} tokens over {args.max_document_tokens}")
-        if name != "test" or fresh is None:
-            notes.append(f"{name}: {len(rows)} chunks")
-
-    # 3. token_ids must stay in range and exclude control tokens from text.
+    # meaningless, so document identity must be disjoint. Every doc id is held, but a doc id
+    # is a 64-hex-character sha256, so this stays far smaller than holding the rows.
+    doc_ids = {name: set() for name in names}
+    counts = Counter()
+    # 2 and 3. Chunk format, vocabulary range and control tokens, checked as rows stream.
     tokenizer = Tokenizer.from_file(str(root / "tokenizer.json"))
     vocab = tokenizer.get_vocab_size()
     control = {tokenizer.token_to_id(t) for t in ("[PAD]", "[UNK]", "[BOS]", "[SEP]", "[EOS]")}
     control.discard(None)
     out_of_range = control_hits = 0
-    for rows in splits.values():
-        for row in rows:
-            out_of_range += sum(1 for t in row["token_ids"] if not 0 <= t < vocab)
-            control_hits += sum(1 for t in row["token_ids"] if t in control)
+    for name in names:
+        longest = 0
+        malformed = False
+        if paths[name].exists():
+            for row in stream(paths[name]):
+                counts[name] += 1
+                if row.get("doc_id"):
+                    doc_ids[name].add(row["doc_id"])
+                if not malformed and not REQUIRED_KEYS.issubset(row):
+                    problems.append(f"{name} row missing keys: {sorted(REQUIRED_KEYS - set(row))}")
+                    malformed = True
+                ids = row["token_ids"]
+                longest = max(longest, len(ids))
+                out_of_range += sum(1 for t in ids if not 0 <= t < vocab)
+                control_hits += sum(1 for t in ids if t in control)
+        if counts[name] == 0:
+            problems.append(f"{name} is empty")
+        if longest > args.max_document_tokens:
+            problems.append(f"{name} has a chunk of {longest} tokens over {args.max_document_tokens}")
+    for a, b in (("train", "valid"), ("train", "test"), ("valid", "test")):
+        shared = doc_ids[a] & doc_ids[b]
+        if shared:
+            problems.append(f"{a}/{b} share {len(shared)} document ids")
+        # group keys are internal to the builder; the manifest records the policy
+    notes.append(f"documents: " + ", ".join(f"{n}={counts[n]}" for n in names))
+    if manifest.get("split_policy") is None:
+        problems.append("manifest does not state a split policy")
     if out_of_range:
         problems.append(f"{out_of_range} token ids outside the vocabulary")
     if control_hits:
         problems.append(f"{control_hits} control tokens appear as text")
 
     # 4. The fresh test split must be byte-identical, or the held-out claim is not reproducible.
-    if fresh is not None:
-        if fresh != splits["test"]:
+    fresh_path = root / "test-fresh.jsonl"
+    if fresh_path.exists():
+        if digest(fresh_path) != digest(paths["test"]):
             problems.append("test-fresh.jsonl differs from test.jsonl")
         else:
-            notes.append(f"fresh_test: byte-identical to test, {len(fresh)} chunks")
+            notes.append("fresh_test: byte-identical to test")
     else:
         notes.append("test-fresh.jsonl absent; held-out reuse not checked")
 
@@ -107,10 +121,10 @@ def main():
             problems.append(f"file {path.name} is not recorded in the manifest")
 
     # 6. Manifest counts must agree with the files it describes.
-    counted = sum(len(rows) for rows in splits.values())
+    counted = sum(counts.values())
     statistics = manifest.get("statistics", {})
     # fresh_test is a copy of test, so counting every statistics entry double-counts it.
-    recorded_chunks = sum(statistics.get(name, {}).get("sequences", 0) for name in splits)
+    recorded_chunks = sum(statistics.get(name, {}).get("sequences", 0) for name in names)
     if recorded_chunks and recorded_chunks != counted:
         problems.append(f"manifest sequences {recorded_chunks} != {counted} chunks on disk")
     kept = manifest.get("kept_documents")
@@ -126,7 +140,7 @@ def main():
         notes.append(f"tokenizer policy: {manifest.get('tokenizer_training_split')}")
 
     report = {"data_dir": str(root), "documents": counted,
-              "per_split": {name: len(rows) for name, rows in splits.items()},
+              "per_split": {name: counts[name] for name in names},
               "vocab": vocab, "target_tokens": manifest.get("target_tokens"),
               "problems": problems, "notes": notes}
     if args.out:
