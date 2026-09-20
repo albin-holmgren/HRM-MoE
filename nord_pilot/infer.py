@@ -5,7 +5,7 @@ ROOT=Path(__file__).resolve().parent
 sys.path.insert(0,str(ROOT.parent))
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--export',type=Path,required=True);p.add_argument('--device',choices=['cpu','cuda'],required=True);p.add_argument('--tokens',type=int,default=16);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--export',type=Path,required=True);p.add_argument('--device',choices=['cpu','cuda'],required=True);p.add_argument('--tokens',type=int,default=16);p.add_argument('--data-dir',type=Path,default=ROOT/'data');a=p.parse_args()
     if a.device=='cpu':os.environ['NORD_REFERENCE_ATTENTION']='1'
     import torch
     import contextlib
@@ -15,14 +15,16 @@ def main():
     from nord_pilot.run import digest, configure_cuda_mixed_precision
     torch.set_num_threads(4)
     ck=torch.load(a.export,map_location='cpu',weights_only=False)
-    assert digest(ROOT/'data/tokenizer.json')==ck['tokenizer_sha256']
+    assert digest(a.data_dir/'tokenizer.json')==ck['tokenizer_sha256']
     cfg=ck['config']; model=LMHead(HierarchicalReasoningModel(cfg),cfg).to(a.device)
     model.load_state_dict(ck['model']);model.eval()
     if a.device=='cuda':configure_cuda_mixed_precision(model)
-    tok=Tokenizer.from_file(str(ROOT/'data/tokenizer.json'))
-    row=json.loads((ROOT/'data/valid.jsonl').read_text().splitlines()[0])
-    ids=[tok.token_to_id('[BOS]')]+tok.encode(row['instruction']).ids+[tok.token_to_id('[SEP]')]
-    prefix=len(ids);generated=[]
+    tok=Tokenizer.from_file(str(a.data_dir/'tokenizer.json'))
+    row=json.loads((a.data_dir/'valid.jsonl').read_text().splitlines()[0])
+    if row.get('kind')=='pretrain':
+        ids=[tok.token_to_id('[BOS]')]+row['token_ids'][:16]
+    else:ids=[tok.token_to_id('[BOS]')]+tok.encode(row['instruction']).ids+[tok.token_to_id('[SEP]')]
+    prefix=1 if row.get('kind')=='pretrain' else len(ids);generated=[]
     with torch.inference_mode():
         for _ in range(a.tokens):
             if len(ids)>=cfg['max_seq_len']:break

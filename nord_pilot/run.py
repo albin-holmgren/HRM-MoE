@@ -34,6 +34,7 @@ def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument('--device', choices=['cpu','cuda'], required=True)
     ap.add_argument('--config', type=Path, required=True)
+    ap.add_argument('--data-dir',type=Path,default=ROOT/'data')
     ap.add_argument('--out', type=Path, required=True)
     ap.add_argument('--steps', type=int, default=40)
     ap.add_argument('--schedule-steps', type=int, default=200)
@@ -74,7 +75,7 @@ def main():
     torch.manual_seed(a.seed)
     random.seed(a.seed)
     cfg = json.loads(a.config.read_text())
-    tok = Tokenizer.from_file(str(ROOT/'data/tokenizer.json'))
+    tok = Tokenizer.from_file(str(a.data_dir/'tokenizer.json'))
     if tok.get_vocab_size() > cfg['vocab_size']:
         raise ValueError('Tokenizer does not fit model vocabulary')
     if a.batch_tokens < cfg['max_seq_len']:
@@ -87,11 +88,11 @@ def main():
     if a.device == 'cuda':configure_cuda_mixed_precision(model)
     optim = AdamATan2(model.parameters(), lr=2e-4, ema=0.999)
     parameter_count = sum(p.numel() for p in model.parameters())
-    fingerprint = {'config':cfg, 'tokenizer_sha256':digest(ROOT/'data/tokenizer.json'),
-       'train_sha256':digest(ROOT/'data/train.jsonl'), 'valid_sha256':digest(ROOT/'data/valid.jsonl'),
+    fingerprint = {'config':cfg, 'tokenizer_sha256':digest(a.data_dir/'tokenizer.json'),
+       'train_sha256':digest(a.data_dir/'train.jsonl'), 'valid_sha256':digest(a.data_dir/'valid.jsonl'),
        'early_stop_patience':a.early_stop_patience,'eval_every':a.eval_every,'min_delta':a.min_delta,
        'batch_tokens':a.batch_tokens,'schedule_steps':a.schedule_steps,'seed':a.seed,'device':a.device,
-       'source_sha256':digest(__file__), 'reference_sha256':digest(ROOT/'reference_attention.py'), 'torch_version':str(torch.__version__), 'stress_context':a.stress_context}
+       'records_source_sha256':digest(ROOT/'data_tools/records.py'),'source_sha256':digest(__file__), 'reference_sha256':digest(ROOT/'reference_attention.py'), 'torch_version':str(torch.__version__), 'stress_context':a.stress_context}
     # Bind recovery to the source tree, not just the runner.
     fingerprint['model_sources'] = {str(p.relative_to(ROOT.parent)):digest(p) for p in sorted((ROOT.parent/'models').rglob('*.py'))}
     step, cursor = 0, 0
@@ -111,15 +112,11 @@ def main():
         if a.device == 'cuda': torch.cuda.set_rng_state_all(ck['cuda_rng'])
     records = {}
     for name in ('train','valid'):
-        records[name] = [json.loads(x) for x in (ROOT/f'data/{name}.jsonl').read_text().splitlines()]
+        records[name] = [json.loads(x) for x in (a.data_dir/f'{name}.jsonl').read_text().splitlines()]
     random.Random(a.seed).shuffle(records['train'])
-    def encode(r):
-        prefix = [tok.token_to_id('[BOS]')] + tok.encode(r['instruction']).ids + [tok.token_to_id('[SEP]')]
-        answer = tok.encode(r['response']).ids + [tok.token_to_id('[EOS]')]
-        if len(prefix)+len(answer)-1 > cfg['max_seq_len']:
-            raise ValueError('Sample exceeds max_seq_len; do not silently truncate evidence')
-        return prefix, answer
-    encoded = {k:[encode(r) for r in rs] for k,rs in records.items()}
+    from nord_pilot.data_tools.records import encode_record
+    vocab_size=tok.get_vocab_size()
+    encoded = {k:[encode_record(r,tok,cfg['max_seq_len'],vocab_size) for r in rs] for k,rs in records.items()}
     if a.stress_context:
         def extend(pair):
             p,r=pair
@@ -234,7 +231,7 @@ def main():
        'final_valid_loss':final_valid,'first_train_loss':losses[0] if losses else None,'last_train_loss':losses[-1] if losses else None,
        'input_tokens':tokens,'training_seconds':sum(times),'tokens_per_training_second':tokens/sum(times) if times else None,
        'peak_memory_bytes':torch.cuda.max_memory_allocated() if a.device=='cuda' else None,
-       'wall_seconds':time.monotonic()-start,'capability_claim':'none; synthetic technical fixture'}
+       'wall_seconds':time.monotonic()-start,'capability_claim':'none; technical/data rehearsal, not a capability benchmark'}
     (a.out/'summary.json').write_text(json.dumps(summary,indent=2));print(json.dumps(summary),flush=True)
     if step!=a.steps and not early_stopped:sys.exit(3)
 if __name__=='__main__':main()

@@ -964,3 +964,13 @@ AIME25 Majority Voting（百分比）：
 - 专门针对单商店 fixture 的规则检查器：每个模型 80 条中 64 条正确输出、16 条拒答。该结果包含训练样本，不能作为通用模型质量分数。生成仅在 fixture tokenizer 的实际词表中 greedy 解码，最多 24 tokens。
 - runner 新增全量验证、best-export.pt、可选 early stopping，checkpoint 保存 selection 与 best_model；CPU 连续/恢复训练 75 tensors 完全一致。已早停 checkpoint 恢复后不再训练，best weights 未被末尾权重覆盖。14 项测试通过。新增 runner 尚未在 GPU 复测；首轮 H100 gate 失败记录保持不变。
 - 旧 GPU full checkpoint 应使用保留的 050bd0a 打包版本恢复；新 runner fingerprint/selection 格式变化，不能假装直接兼容。
+# 2026-09-20 本地真实语料准备
+
+- 旧 Nord 文档 43 的 18.5T 指公开 FineWeb 供应量，不是已准备的本地语料。新增云/API 支出 $0。
+- 下载 FineWeb-Edu、FineMath、FineWeb-2 Swedish、Cosmopedia-v2 共 5,500 文档，缓存 27,712,798 bytes；保留 4,909，过滤 591。使用 source revisions、page hashes、normalized exact dedup、MinHash 候选检查及独立 split。
+- train/valid/test 文档数 4,421/254/234；text tokens 4,211,637/238,389/202,217。exact normalized overlap=0；未完成全面 benchmark contamination audit。
+- 新 8,192-token byte BPE 只在 train 上学习。held-out tokens 相对旧 fixture tokenizer 减少：edu 69.42%、explanations 71.92%、math 65.66%、Swedish 62.62%。这不是 GPU speedup 或能力提升测量。
+- 首次 CPU 检查卡在每 token 调用 get_vocab_size()；process sample 证实复制词表开销。中断后改成一次读取，重新运行成功。
+- 1,188,864 参数 CPU HRM+MoE 完成 12 steps / 11,471 input tokens；完整 validation 1,070 chunks / 254 docs，loss 9.51158 -> 9.47015，wall 18.66s。best-export fresh-process reload 通过。18 个本地测试通过。这是数据管线测试，不是 94M/0.6B 能力测试。
+- 复用旧 pilot24 的 22 个 DeepSeek V4.1 Flash 历史 subprocess verified examples（20 train / 2 valid）；未重新执行其测试，未复制长 reasoning traces 到训练 target。
+- 另准备 50 个 high-reasoning teacher 请求和独立整数答案检查，未发送。按每条 1,000 input + 最多 4,096 output/reasoning tokens，direct API offpeak/peak 估算 $0.13038/$0.26076。建议 $1 上限未配置为账单限制。新增 API/Verda 费用为 0。
