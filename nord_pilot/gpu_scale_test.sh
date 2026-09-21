@@ -7,7 +7,7 @@
 #   2. The validator loss improves on held-out documents the model never trained on.
 # The second is the gate that separates "the pipeline trains" from "the number is real".
 #
-# Usage: gpu_scale_test.sh <out-dir> <config> <corpus-dir> <minutes> [steps] [subprocess-minutes] [schedule-steps]
+# Usage: gpu_scale_test.sh <out-dir> <config> <corpus-dir> <minutes> [steps] [subprocess-minutes] [schedule-steps] [parent-export] [peak-lr] [seed]
 # Set NORD_PLAN_ONLY=1 to print the exact trainer invocations instead of running them. The
 # plan is built here rather than restated elsewhere, so a replay of this mode is a check of
 # the real thing: each printed command is fed back through the trainer's own --check-only
@@ -29,12 +29,43 @@ minutes=${4:-25}
 steps=${5:-20000}
 schedule_steps=${7:-8000}
 child_minutes=${6:-4}
+# A trusted parent export turns this into a weights-only continuation: every invocation below
+# initializes from those weights instead of random, so the paid run extends an existing lineage
+# rather than starting a new one. run.py verifies the parent config and tokenizer hash before
+# loading it, and the held-out comparison below then reads parent-versus-continued.
+parent=${8:-}
+# Held as one string and appended with word splitting rather than as a possibly-empty array:
+# this script also runs under macOS bash 3.2, where expanding an empty array in a quoted
+# "${array[@]}" position raises "unbound variable" under set -u.
+init_args=""
+[[ -n "$parent" ]] && init_args="--init-export $parent"
+# A continuation starts from weights that already sit at the floor of an earlier cosine, so it
+# restarts the schedule from a lower peak than a fresh run. Re-entering at the fresh-run peak
+# would step the model back up the loss curve it just descended, spending paid steps undoing
+# progress instead of adding it. Empty means use the runner default (2e-4).
+lr=${9:-}
+lr_args=""
+[[ -n "$lr" ]] && lr_args="--lr $lr"
+# The training order is a seeded permutation of the corpus, so a second run on the same corpus
+# with the same seed would replay the records the first run already consumed. Changing the seed
+# keeps the run reproducible while sampling a different slice of the same bounded prefix.
+seed=${10:-42}
+seed_args="--seed $seed"
+# Early stopping is measured against the loss this run started from. With a parent that
+# baseline is a trained checkpoint, and a restart at the peak learning rate legitimately
+# spends its first hundred-plus steps above that baseline before descending through it, so
+# patience would end the paid session at its first four checks. Continuations therefore run
+# patience-free: the step cap and the wall-clock cap still bound them, and the best export and
+# the parent-versus-continued comparison below still decide whether the run produced evidence.
+patience=4
+[[ -n "$parent" ]] && patience=0
 
 # Recovery equivalence is checked first, at short duration, so a resume bug costs seconds
 # rather than a full billed run. 20 steps vs 10+10 must still agree exactly. The schedule is
 # longer than these caps, so the caps are what stop them.
 gate=(--device cuda --config "$config" --data-dir "$data" --batch-tokens 2048 --minutes "$child_minutes" \
   --schedule-steps "$schedule_steps" --eval-every 5 --checkpoint-every 10 --early-stop-patience 0 --valid-records 256)
+gate+=($init_args $lr_args $seed_args)
 
 # Batch size is the one knob that converts the wall-clock budget directly into learning. This
 # run is stopped by the clock, so input tokens per second is what decides how many updates the
@@ -46,9 +77,11 @@ gate=(--device cuda --config "$config" --data-dir "$data" --batch-tokens 2048 --
 gate_batch=2048
 train_batch=$gate_batch
 
-# Full schedule. It initializes from the same step-0 weights the baseline holds, so the
-# before/after comparison is against exactly the weights this run started from instead of a
-# half-trained checkpoint.
+# Full schedule. Without a parent it initializes from the same step-0 weights the baseline
+# holds, so the before/after comparison is against exactly the weights this run started from
+# rather than a half-trained checkpoint. With a parent it continues those weights, and the
+# initial export written before the first update is the parent itself, so the comparison is
+# parent-versus-continued.
 # eval-every is 250 steps so validation is a small fraction of the wall clock rather than a
 # steady tax, and the final held-out score is bounded separately below.
 # The step cap is the ceiling the wall clock is not expected to reach; schedule-steps sets how
@@ -58,7 +91,7 @@ plan=(
   "python nord_pilot/run.py ${gate[*]} --out $out/full --steps 20 --save-initial-export $out/initial-export.pt"
   "python nord_pilot/run.py ${gate[*]} --out $out/resumed --steps 10"
   "python nord_pilot/run.py ${gate[*]} --out $out/resumed --steps 20 --resume $out/resumed/latest.pt"
-  "python nord_pilot/run.py --device cuda --config $config --data-dir $data --batch-tokens $train_batch --minutes $minutes --schedule-steps $schedule_steps --eval-every 250 --checkpoint-every 500 --early-stop-patience 4 --min-delta .005 --valid-records 1024 --init-export $out/initial-export.pt --out $out/trained --steps $steps"
+  "python nord_pilot/run.py --device cuda --config $config --data-dir $data --batch-tokens $train_batch --minutes $minutes --schedule-steps $schedule_steps --eval-every 250 --checkpoint-every 500 --early-stop-patience $patience --min-delta .005 --valid-records 1024 --init-export ${parent:-$out/initial-export.pt} $lr_args $seed_args --out $out/trained --steps $steps"
 )
 if [[ "${NORD_PLAN_ONLY:-0}" == 1 ]]; then
   printf '%s\n' "${plan[@]}"
@@ -66,6 +99,7 @@ if [[ "${NORD_PLAN_ONLY:-0}" == 1 ]]; then
 fi
 
 test ! -e "$out" || { echo 'Refusing to overwrite a run'; exit 2; }
+[[ -z "$parent" ]] || test -f "$parent"
 test -f "$config"
 test -f "$data/tokenizer.json" && test -f "$data/train.jsonl" && test -f "$data/valid.jsonl" && test -f "$data/test-fresh.jsonl"
 mkdir -p "$out"
@@ -83,8 +117,9 @@ fi
 echo "Training batch size: $train_batch"
 
 train=(--device cuda --config "$config" --data-dir "$data" --batch-tokens "$train_batch" --minutes "$minutes" \
-  --schedule-steps "$schedule_steps" --eval-every 250 --checkpoint-every 500 --early-stop-patience 4 --min-delta .005 \
-  --valid-records 1024 --init-export "$out/initial-export.pt")
+  --schedule-steps "$schedule_steps" --eval-every 250 --checkpoint-every 500 --early-stop-patience "$patience" --min-delta .005 \
+  --valid-records 1024 --init-export "${parent:-$out/initial-export.pt}")
+train+=($lr_args $seed_args)
 
 python nord_pilot/run.py "${gate[@]}" --out "$out/full" --steps 20 --save-initial-export "$out/initial-export.pt" | tee "$out/full.log"
 python nord_pilot/run.py "${gate[@]}" --out "$out/resumed" --steps 10 | tee "$out/first-half.log"
