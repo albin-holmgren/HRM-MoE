@@ -684,3 +684,22 @@ GPU, distributed, FA3, and FSDP2 behavior should be validated through rjob.
   (`layer_passes = (L_cycles*H_cycles + H_cycles) * per_level = 16` block applications per token), so
   our 12.63% is a true MFU, not an inflated one, and does not rest on counting unique parameters
   alone.
+- Soup's live path was then run end to end rather than only read: `work/soup-live-test` SFTs
+  Qwen2.5-0.5B with LoRA r=8 on MPS, 8 alpaca rows, 4 steps, loss 3.9734, and writes a checkpoint.
+  Two format traps cost time: the config schema has no `max_steps` (v0.75 refuses unknown keys and
+  suggests `save_steps`), and the `alpaca` loader reads `instruction`/`input`/`output`, so a file
+  written with `response` loads as `Loaded: 0 train samples` and then fails downstream with
+  `Column name ['messages'] not in the dataset`. Neither reaches our model: a base only loads
+  through `AutoModelForCausalLM.from_pretrained`. Soup does expose `--trust-remote-code`, but that
+  only helps a config with `auto_map` and local custom code; our flat config.json still fails with
+  `model type 'nord_hrm_moe' ... Transformers does not recognize this architecture`. So Soup is
+  reachable for us only after an HF-loadable export exists, which is real work we have not done.
+- The transferable half of autoresearch was ported rather than admired: `nord_pilot/budget_search.py`
+  runs a fixed wall-clock budget per variant, scores one held-out metric, keeps the strictly better
+  result and logs every attempt, with `nord_pilot/test_budget_search.py` pinning the overlay and
+  keep/discard rules (7 tests; the whole local suite is now 43 passing). A 7-variant screen over the
+  CPU config took 12 seconds and cost nothing, and it already separates real choices: at 24 steps the
+  held-out loss went 10.36 (lr 2e-4) -> 9.09 (lr 6e-4) -> 7.89 (4 layers, lr 6e-4), while `top1`
+  routing, zero aux loss and a lower learning rate all landed at or above the baseline. Treat these
+  as signs about which knob matters on the tiny fixture, not as a result that transfers to the
+  187M run; the point is that screening is now free and only survivors need the H100.

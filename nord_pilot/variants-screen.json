@@ -1,0 +1,41 @@
+[
+  {
+    "name": "base_lr2e4",
+    "overlay": {}
+  },
+  {
+    "name": "base_lr6e4",
+    "overlay": {},
+    "lr": 0.0006
+  },
+  {
+    "name": "base_lr1e4",
+    "overlay": {},
+    "lr": 0.0001
+  },
+  {
+    "name": "aux_zero",
+    "overlay": {
+      "moe_router_aux_loss_coef": 0
+    }
+  },
+  {
+    "name": "top1",
+    "overlay": {
+      "moe_top_k": 1
+    }
+  },
+  {
+    "name": "depth4",
+    "overlay": {
+      "n_layers": 4
+    }
+  },
+  {
+    "name": "depth4_lr6e4",
+    "overlay": {
+      "n_layers": 4
+    },
+    "lr": 0.0006
+  }
+]
