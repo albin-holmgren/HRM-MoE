@@ -659,3 +659,28 @@ GPU, distributed, FA3, and FSDP2 behavior should be validated through rjob.
   instance gone and re-deleted the volume idempotently. `cleanup.py` now retries the listings
   until the deleted ids disappear. Deleting is the action that stops billing; the listing is only
   the proof, so the proof is what should wait.
+- Two third-party repositories were evaluated as possible cost reductions, and both were measured
+  on this Mac rather than inferred from their documentation. **Soup** (v0.75.0, Apache-2.0) was
+  installed from source into `work/soup-env` (torch 2.14.0, transformers 5.17.0); `soup doctor`
+  passes. It is a fine-tuning and post-training tool: every model-loading path in it is
+  `AutoModelForCausalLM.from_pretrained`, the config schema requires `base`, and a grep for
+  `from_scratch|random_init|pretrained=False` across `src/soup_cli/` returns nothing. It cannot
+  train our model from scratch. Its layer-streaming headline (8B in 3.32 GB) streams a *frozen*
+  base from host RAM one decoder layer at a time while LoRA adapters stay resident, so it applies
+  to adaptation, never to pretraining base weights; its own record measures it **1.43x slower than
+  resident** training. Our 187M export was then offered to it directly and transformers refused it:
+  `ValueError: Unrecognized model ... Should have a `model_type` key in its config.json`. The
+  three .pt files carry no `config.json`, and every one of the 43 tensors is a custom name
+  (`model.H_level.core.layers.N.attn.gqkv_proj.weight`, `...experts.gate_up_weight`) with zero
+  `model.layers.*` names. Soup's useful role is downstream of our work and only if the model is
+  exported in HF-loadable form: alignment/SFT/DPO/GRPO, MoE adapters, GGUF/ONNX export, serving.
+- **Autoresearch** (karpathy, MIT, ~96k stars) cannot run here as shipped. `train.py` hardcodes
+  `torch.device("cuda")`, CUDA-only FlashAttention-3 selected by `torch.cuda.get_device_capability()`,
+  and `torch==2.9.1` installed from the `pytorch-cu128` index; `prepare.py` and `train.py` both call
+  CUDA. This Mac has MPS and no CUDA, so the loop needs either an NVIDIA box or real porting work.
+  What transfers for free is its *method*: one file, a fixed wall-clock budget, one metric,
+  keep-if-better/discard-if-worse, and a results log. Its own baseline reports 39.8% MFU on an H100.
+  Note when comparing that number to ours: `cost_model.py` counts our recurrence correctly
+  (`layer_passes = (L_cycles*H_cycles + H_cycles) * per_level = 16` block applications per token), so
+  our 12.63% is a true MFU, not an inflated one, and does not rest on counting unique parameters
+  alone.
