@@ -623,3 +623,21 @@ GPU, distributed, FA3, and FSDP2 behavior should be validated through rjob.
   step-9750 text the GPU produced.
 - A push to the upstream `XiaoYee/HRM-MoE` is denied (403) for `albin-holmgren`, so the branch
   is published to the fork `albin-holmgren/HRM-MoE` instead.
+- The third paid scaled run (revision `99c0dc4`, 75-minute container budget, weights-only
+  continuation of run 2) is the counterexample that the other two should be read against. Its
+  learning was real: valid loss fell from 3.5677182 (the parent itself) to 3.4613595 at step
+  3250, monotonically, with all eight experts routed and no NaN. Its weights did not survive.
+  The batch probe had measured 65536 at a shallow backprop depth (49.77 GB at 8 steps) and the
+  training run reached the deep end of the warmup at step 3400, where `F.cross_entropy` tried
+  to allocate 7.99 GiB against 73.96/79.18 GiB in use and the process exited with a traceback.
+  `best-export.pt` was then written only on the post-loop path, so the measured improvement
+  was downloaded as numbers with no weights behind them and `technical_pass` is null. Spend
+  $3.39595. Treat a probe that does not measure the depth the run reaches as no measurement.
+- A memory wall must not be allowed to cost the session's weights. Three fixes now hold that
+  line and each has a unit test: `batch_probe.py` pins `MEASUREMENT_BP_STEPS=5` and rejects any
+  candidate above `MAX_PEAK_FRACTION=0.72` of the card even when it is the fastest; `run.py`
+  writes `best-export.pt` the moment a better validation loss is found and adds a weights-only
+  `latest-weights.pt` beside the optimizer-carrying `latest.pt`; and an out-of-memory stop is
+  caught and recorded as `status='out_of_memory'`, still writing the exports, the summary and
+  the held-out score. What a paid run is worth is decided by what is on disk after a crash, not
+  by the loss it had reached.

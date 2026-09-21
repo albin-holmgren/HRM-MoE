@@ -21,6 +21,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_BATCH = 2048
+# The probe must measure the same backprop depth the production run reaches, or it reports a
+# memory footprint well below the one that actually has to fit. The third scaled run probed
+# 65536 with a short window, which left it at the shallow end of the warmup, then trained at
+# the deep end and died there. This depth is the scaled config's bp_max_steps.
+MEASUREMENT_BP_STEPS = 5
+# A candidate is eligible only if its measured peak leaves this fraction of the card unused.
+# Fragmentation, the final evaluation, and the held-out scoring pass all allocate outside the
+# measured training step, so a configuration that just fits is not one that completes.
+MAX_PEAK_FRACTION = 0.72
+TOTAL_GPU_MEMORY_GB = 80.0
 
 
 def invocation(python, config, data, out, batch, steps, minutes, schedule_steps):
@@ -29,6 +39,7 @@ def invocation(python, config, data, out, batch, steps, minutes, schedule_steps)
             '--data-dir', str(data), '--out', str(out), '--batch-tokens', str(batch),
             '--steps', str(steps), '--minutes', str(minutes),
             '--schedule-steps', str(schedule_steps),
+            '--bp-steps', str(MEASUREMENT_BP_STEPS),
             # Validation is switched off inside the measured window: this probe measures step
             # time, and an evaluation in the middle would be attributed to the batch size.
             '--eval-every', '100000', '--checkpoint-every', '100000',
@@ -36,11 +47,28 @@ def invocation(python, config, data, out, batch, steps, minutes, schedule_steps)
 
 
 def choose_batch(rows, default=DEFAULT_BATCH):
-    """Fastest measured batch size wins; rows with no measurement are ignored."""
-    measured = [row for row in rows if row.get('tokens_per_second')]
-    if not measured:
-        return default
-    return int(max(measured, key=lambda row: row['tokens_per_second'])['batch_tokens'])
+    """Fastest eligible measured batch size wins.
+
+    Eligibility is not only "it ran": a candidate whose measured peak sits above the headroom
+    cap is discarded even when it was the fastest, because that number came from a shape with
+    no margin left for the evaluation and scoring passes that follow training. A batch faster
+    than the validated default is worthless if it cannot finish the run it is chosen for.
+    """
+    eligible = [row for row in rows
+                if row.get('tokens_per_second')
+                and (row.get('peak_memory_gb') is None
+                     or row['peak_memory_gb'] <= MAX_PEAK_FRACTION * TOTAL_GPU_MEMORY_GB)]
+    if eligible:
+        return int(max(eligible, key=lambda row: row['tokens_per_second'])['batch_tokens'])
+    measured = [row for row in rows
+                if row.get('tokens_per_second') and row.get('peak_memory_gb') is not None]
+    if measured:
+        # Every measured candidate wanted more of the card than the headroom cap allows. Speed
+        # is not the deciding factor in that case: the shape with the smallest measured peak is
+        # the one with the most margin, and it is known to have run. Falling back to the 2048
+        # default here would discard that information and train at a tenth of the rate.
+        return int(min(measured, key=lambda row: row['peak_memory_gb'])['batch_tokens'])
+    return default
 
 
 def steady_state_rate(metrics_path):
@@ -68,7 +96,10 @@ def main():
     ap.add_argument('--config', type=Path, required=True)
     ap.add_argument('--data-dir', type=Path, required=True)
     ap.add_argument('--out', type=Path, required=True)
-    ap.add_argument('--candidates', default='2048,8192,16384,32768')
+    # The first probe topped out at 32768 and left over half the H100's memory unused, so
+    # the next size up is measured too. A candidate that does not fit is skipped by the
+    # existing failure path rather than aborting the probe, so offering it costs nothing.
+    ap.add_argument('--candidates', default='2048,8192,16384,32768,65536')
     ap.add_argument('--steps', type=int, default=20)
     ap.add_argument('--minutes', type=float, default=0.5)
     ap.add_argument('--schedule-steps', type=int, default=8000)
@@ -137,6 +168,8 @@ def main():
     chosen = choose_batch(rows)
     (a.out / 'batch-probe.json').write_text(json.dumps(
         {'chosen_batch_tokens': chosen, 'validated_default': DEFAULT_BATCH,
+         'measurement_bp_steps': MEASUREMENT_BP_STEPS,
+         'max_peak_fraction': MAX_PEAK_FRACTION,
          'measurements': rows}, indent=2))
     (a.out / 'chosen-batch.txt').write_text(str(chosen))
     print(json.dumps({'chosen_batch_tokens': chosen}))

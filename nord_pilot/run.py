@@ -55,6 +55,7 @@ def parse_args():
     ap.add_argument('--min-delta',type=float,default=0.0)
     ap.add_argument('--seed', type=int, default=42)
     ap.add_argument('--stress-context', action='store_true', help='Fill each prefix to the context limit for a kernel/memory stress test, not quality training')
+    ap.add_argument('--bp-steps', type=int, default=0, help='Pin the backprop depth instead of following the warmup schedule. Used by the batch probe so a memory measurement reflects the depth the production run reaches, not the shallow depth an 8-step probe would sit at.')
     ap.add_argument('--check-only', action='store_true', help='Validate the run bounds and exit before importing torch or reading the corpus, so a planned invocation can be replayed for free')
     return ap.parse_args()
 
@@ -67,6 +68,8 @@ def main():
         raise ValueError('Invalid step/time bounds')
     if a.early_stop_patience < 0 or a.eval_every <= 0 or a.min_delta < 0:
         raise ValueError('Invalid validation controls')
+    if a.bp_steps < 0:
+        raise ValueError('Invalid backprop-depth override')
     if a.lr <= 0 or not 0 <= a.lr_warmup_frac < 1 or not 0 <= a.lr_min_ratio <= 1:
         raise ValueError('Invalid learning-rate controls')
     if a.check_only:
@@ -138,6 +141,11 @@ def main():
         return a.lr * (a.lr_min_ratio + (1 - a.lr_min_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress)))
     def bp_steps_at(step_now):
         # Delegates to the model's own warmup so the pilot and upstream cannot drift apart.
+        # An explicit override exists for measurement: a short probe would otherwise sit at the
+        # shallow end of the warmup and report a memory footprint far below the one the paid run
+        # reaches, which is how the third run came to be launched with a batch that did not fit.
+        if a.bp_steps > 0:
+            return a.bp_steps
         return model.compute_train_extra_args(
             SimpleNamespace(step=step_now, total_steps=a.schedule_steps))['bp_steps']
     parameter_count = sum(p.numel() for p in model.parameters())
@@ -207,10 +215,27 @@ def main():
         ctx={'aux_losses':[],'expert_counts':[]}
         with autocast():
             _, logits=model(None,batch,moe_context=ctx,bp_steps=bp_steps)
-            ce=F.cross_entropy(logits.float(),labels,ignore_index=-100)
+            ce=cross_entropy_sliced(logits,labels)
             aux=torch.stack(ctx['aux_losses']).mean() if ctx['aux_losses'] else ce.new_zeros(())
             loss=ce+cfg['moe_router_aux_loss_coef']*aux
         return loss,ce,ctx
+    def cross_entropy_sliced(logits, labels, slice_tokens=8192):
+        # A full-batch float32 upcast of the logits is the single largest allocation in a step:
+        # at the scaled batch it is 65383 x 32768 x 4 bytes, about 8 GiB, and that allocation is
+        # exactly what the third paid run died on. Reducing over slices leaves the loss value
+        # unchanged while capping the transient at one slice instead of the whole batch.
+        total=None
+        targets=None
+        for start in range(0, logits.shape[0], slice_tokens):
+            piece=logits[start:start+slice_tokens]
+            target=labels[start:start+slice_tokens]
+            part=F.cross_entropy(piece.float(), target, ignore_index=-100, reduction='sum')
+            total=part if total is None else total+part
+            count=(target!=-100).sum()
+            targets=count if targets is None else targets+count
+        if total is None or targets is None or int(targets)==0:
+            raise ValueError('No supervised tokens to score')
+        return total/targets
     def evaluate():
         model.eval()
         # Evaluation uses the deepest backprop depth the schedule reaches, so the loss does
@@ -230,11 +255,21 @@ def main():
         nonlocal best_model,early_stopped
         if selection['last_eval_step']==step:return
         selection['last_eval_step']=step
-        if value < selection['best_loss']-a.min_delta:
+        improved=value < selection['best_loss']-a.min_delta
+        if improved:
             selection.update(best_loss=value,best_step=step,bad_checks=0)
             best_model={k:v.detach().cpu().clone() for k,v in model.state_dict().items()}
         else:selection['bad_checks']+=1
         early_stopped=a.early_stop_patience>0 and selection['bad_checks']>=a.early_stop_patience
+        if improved:
+            # Write the best weights as soon as they are found, not only after the loop exits.
+            # The third scaled run crashed out of memory at step 3400 with the whole session's
+            # improvement already measured, and because best-export.pt was written only on the
+            # path after the loop, its weights were lost while its loss numbers survived. An
+            # export here costs under a second and makes a crash cost the tail, not the run.
+            atomic_save(a.out/'best-export.pt',{'model':best_model,'config':cfg,
+                'tokenizer_sha256':fingerprint['tokenizer_sha256'],'step':selection['best_step'],
+                'validation_loss':selection['best_loss']})
         with (a.out/'validation.jsonl').open('a') as f:
             f.write(json.dumps({'step':step,'loss':value,'examples':valid_total,**selection,'early_stopped':early_stopped})+'\n')
     def atomic_save(path, obj):
@@ -250,7 +285,13 @@ def main():
         atomic_save(a.out/'latest.pt',dict(model=model.state_dict(),optim=optim.state_dict(),step=step,cursor=cursor,
             selection=selection,best_model=best_model,
             rng=torch.get_rng_state(),python_rng=random.getstate(),cuda_rng=torch.cuda.get_rng_state_all() if a.device=='cuda' else [],fingerprint=fingerprint))
+        # A weights-only sibling of the same checkpoint. latest.pt carries the optimizer state
+        # and is several times larger, and a wall-clock-bounded run never resumes: it is the
+        # weights that have to survive a crash, so they are written under their own name too.
+        atomic_save(a.out/'latest-weights.pt',dict(model=model.state_dict(),config=cfg,
+            tokenizer_sha256=fingerprint['tokenizer_sha256'],step=step,initialization=initialization))
     stop=[False]
+    oom=False
     for sig in (signal.SIGTERM, signal.SIGINT): signal.signal(sig,lambda *args:stop.__setitem__(0,True))
     start=time.monotonic(); times=[]; losses=[]; tokens=0
     initial_valid=evaluate()
@@ -274,11 +315,22 @@ def main():
         model.train(); optim.zero_grad(set_to_none=True)
         step_lr=learning_rate_at(step)
         for group in optim.param_groups: group['lr']=step_lr
-        loss,ce,ctx=loss_at(b,y,True,bp_steps_at(step))
-        if not torch.isfinite(loss): raise RuntimeError('Nonfinite loss; retaining last good checkpoint')
-        loss.backward()
-        norm=torch.nn.utils.clip_grad_norm_(model.parameters(),1.0,error_if_nonfinite=True)
-        optim.step()
+        try:
+            loss,ce,ctx=loss_at(b,y,True,bp_steps_at(step))
+            if not torch.isfinite(loss): raise RuntimeError('Nonfinite loss; retaining last good checkpoint')
+            loss.backward()
+            norm=torch.nn.utils.clip_grad_norm_(model.parameters(),1.0,error_if_nonfinite=True)
+            optim.step()
+        except torch.cuda.OutOfMemoryError:
+            # A memory wall is a stop, not a lost session. The third paid run raised this after
+            # 3400 steps and the process exited before writing anything but metrics, so the whole
+            # session's improvement survived as numbers with no weights behind them. Releasing the
+            # failed graph and leaving the loop the ordinary way means the exports, the summary
+            # and the held-out scoring all still happen and the money buys a checkpoint.
+            oom=True
+            torch.cuda.empty_cache()
+            print(json.dumps({'out_of_memory':True,'step':step}),flush=True)
+            break
         step+=1; cursor=next_cursor
         if a.device=='cuda': torch.cuda.synchronize()
         dt=time.monotonic()-t
@@ -291,10 +343,24 @@ def main():
         if step % a.eval_every==0:observe_validation(evaluate())
         if step % a.checkpoint_every==0:save()
     save()
-    final_valid=evaluate()
+    try:
+        final_valid=evaluate()
+    except torch.cuda.OutOfMemoryError:
+        # Evaluation runs at the schedule's deepest backprop depth, so it can hit the same wall
+        # that stopped training. It is the one number here that is not needed to finish: the best
+        # export was written during the loop and carries its own validation loss, so the run still
+        # ends with weights, a summary and a held-out score instead of a traceback.
+        torch.cuda.empty_cache()
+        final_valid=None
+        print(json.dumps({'evaluation_out_of_memory':True}),flush=True)
     atomic_save(a.out/'export.pt',{'model':model.state_dict(),'config':cfg,'tokenizer_sha256':fingerprint['tokenizer_sha256'],'step':step})
     atomic_save(a.out/'best-export.pt',{'model':best_model,'config':cfg,'tokenizer_sha256':fingerprint['tokenizer_sha256'],'step':selection['best_step'],'validation_loss':selection['best_loss']})
-    summary={'status':'early_stopped' if early_stopped else ('completed' if step==a.steps else 'bounded_stop'),'step':step,'initial_valid_loss':initial_valid,
+    # An out-of-memory stop is reported as its own status rather than folded into 'bounded_stop':
+    # the two look identical in the step count but only one of them is a clock that ran out, and
+    # the pass gate is entitled to tell them apart.
+    status=('out_of_memory' if oom else 'early_stopped' if early_stopped
+            else 'completed' if step==a.steps else 'bounded_stop')
+    summary={'status':status,'step':step,'initial_valid_loss':initial_valid,
        'best_valid_loss':selection['best_loss'],'best_step':selection['best_step'],'validation_examples':valid_total,
        'final_valid_loss':final_valid,'first_train_loss':losses[0] if losses else None,'last_train_loss':losses[-1] if losses else None,
        'input_tokens':tokens,'training_seconds':sum(times),'tokens_per_training_second':tokens/sum(times) if times else None,

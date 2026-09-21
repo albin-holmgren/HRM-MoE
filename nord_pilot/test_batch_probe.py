@@ -24,6 +24,26 @@ class ChooseBatchTest(unittest.TestCase):
                 {'batch_tokens': 16384, 'tokens_per_second': 17167.0}]
         self.assertEqual(choose_batch(rows), 2048)
 
+    def test_a_fast_candidate_without_headroom_is_not_chosen(self):
+        # This is the third scaled run's failure as a unit test: 65536 measured fastest, but at
+        # the memory that measurement implied it had no margin left for the passes that follow
+        # training, and the run died at the deep end of the warmup. Speed alone must not win.
+        rows = [{'batch_tokens': 32768, 'tokens_per_second': 146326.0, 'peak_memory_gb': 46.84},
+                {'batch_tokens': 65536, 'tokens_per_second': 166885.0, 'peak_memory_gb': 72.0}]
+        self.assertEqual(choose_batch(rows), 32768)
+
+    def test_the_largest_roomy_candidate_still_wins_on_speed(self):
+        rows = [{'batch_tokens': 16384, 'tokens_per_second': 111250.0, 'peak_memory_gb': 23.0},
+                {'batch_tokens': 32768, 'tokens_per_second': 146326.0, 'peak_memory_gb': 46.84}]
+        self.assertEqual(choose_batch(rows), 32768)
+
+    def test_when_nothing_has_headroom_the_smallest_peak_is_chosen(self):
+        # No candidate fits the cap, so the choice becomes "which of these actually ran", not
+        # "which was fastest". The default would throw away a usable measurement.
+        rows = [{'batch_tokens': 32768, 'tokens_per_second': 146326.0, 'peak_memory_gb': 62.0},
+                {'batch_tokens': 65536, 'tokens_per_second': 166885.0, 'peak_memory_gb': 78.0}]
+        self.assertEqual(choose_batch(rows), 32768)
+
 
 class SteadyStateRateTest(unittest.TestCase):
     def _write(self, rows):

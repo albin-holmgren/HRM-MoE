@@ -1042,3 +1042,15 @@ AIME25 Majority Voting（百分比）：
 - 清理确认：实例删除、volume 删除、临时 SSH key 删除，active instances=[] / active volumes=[]。balance $16.93983 -> $11.85619（当前 $12.31613），本轮扣费 $5.08364。
 - 修复两个付费陷阱：Verda 跨实例复用 IP 导致陈旧 `known_hosts` 让 accept-new 失败、bootstrap 空转约 28 次（约 $0.8 的 H100 时间），现在每轮开始清空 `known_hosts`；macOS 没有 `setsid`，普通后台 nohup 会随启动它的 shell 退出，改用 `launch-detached.py` 双 fork。
 - 另需记录：诊断期间曾意外创建一台未受 guard 保护的 H100（一个 keep_detached payload 探测绕过了守卫路径），约 90 秒内删除，净支出 $0.0。这是错误操作，不应在守卫路径之外提交看似合理的创建请求。
+
+## 2026-09-21 缩放语料 H100 第三次付费运行：真实进步但权重丢失（revision `99c0dc4`）
+
+- 目的：在 run2 的 187,219,968 参数模型上继续训练，验证更深的 backprop 与更高吞吐能否在同等预算内继续降低 held-out loss。1x H100 80GB / FIN-02，`1H100.80S.32V`，$3.348/h，容器 wall-clock 预算 75 分钟；本地与远程 guard 上限 2 小时或 $8。
+- 初始化：`--init-export` 使用 run2 的 `trained/export.pt`（sha256 `dfc86b7f546c8b19a038f33bf686a13cc03935dc3dc840d9a58fa9dc591901a9`，748,898,609 bytes，43 tensors，step 10000，全部 finite）。weights-only 续跑，fresh optimizer，参数 187,219,968。
+- 免费门槛全部通过：59 项测试、plan gate、pass gate；kernel gate PASS（native FA3 + Triton experts on H100 80GB HBM3）；recovery gate PASS（256 tensors，`max_abs_difference 0.0`）。
+- batch probe 选出 65,536，但**测量本身有缺陷**：probe 只跑 8 步，backprop 深度停在 warmup 的浅端，因此 65,536 只测到 49.77 GB。真实训练在 `bp_warmup_ratio=0.2` 之后到达 bp_max_steps=5 的深度，内存在那里翻倍。
+- **本轮死于 OOM，且死在精确的 warmup 边界**：`schedule_steps=17000` 的 20% 等于 step 3400，训练恰在 step 3400 之后于 `F.cross_entropy(logits.float(), labels)` 尝试分配 7.99 GiB 时失败（73.96/79.18 GiB in use）。这是 run3 唯一的技术失败点，也是 run4 的全部设计依据。
+- 尽管崩溃，学习本身是真的：valid loss 3.5677182（step 0，即父模型本身）-> 3.4613595（step 3250），每个检查点都单调改善，8 个 expert 全部被路由，无 NaN。这是本项目第一次在 held-out valid 上干净地低于父模型。
+- **但权重不可恢复**：collector 只运回 `full/export.pt`、`trained/best-export.pt`、`trained/export.pt`、`trained/summary.json`；当时 `best-export.pt` 只在训练循环正常退出后的路径上写，而 step-3000 的 `latest.pt` 留在磁盘上被实例删除一并丢弃。于是 "loss 改善了" 成为一个没有权重支撑的数字。这使本轮成为**非证据性运行**：`technical_pass: null`。
+- 归档 49 文件 / 752,484,193 bytes，逐项 SHA-256 全匹配（archive 内不存在可用训练权重）；清理确认：实例删除、volume 删除、临时 SSH key 删除，active instances=[] / active volumes=[]。balance $12.31613 -> $8.92018，本轮扣费 **$3.39595**。
+- 本轮暴露的三个付费缺陷已在同一 session 内修复并各有单元测试固定：(1) `batch_probe.py` 现在以 `MEASUREMENT_BP_STEPS=5` 测量真实深度，并以 `MAX_PEAK_FRACTION=0.72` 拒绝没有余量的候选，即便它更快；(2) `run.py` 在找到更好权重时立即写 `best-export.pt`，并新增 `latest-weights.pt`；(3) OOM 被捕获为干净的 `status='out_of_memory'` 中断，仍会写 export、summary 与 held-out 评分，而不再以 traceback 结束。教训：付费运行的价值取决于崩溃时磁盘上剩下什么，而不是崩溃时的 loss 数字。
