@@ -594,3 +594,32 @@ GPU, distributed, FA3, and FSDP2 behavior should be validated through rjob.
 - Paid steps run unattended through `work/verda-scale-private/`, which holds the Verda
   `credentials.json` (mode 600, never bundled or printed). The guard rejects any credential
   file that is group- or world-readable, and the packaging step excludes it from the upload.
+
+- The second paid scaled run (revision `100bd18`, 60-minute container budget, `1H100.80S.32V`
+  in FIN-02, local and remote guards at 2h/$8) completed its full 10,000-step schedule:
+  187,219,968 parameters, valid loss 10.97629937151646 -> best 3.5718350700864128 at step
+  9750, held-out fresh test 10.97513985581203 -> 3.6312330527437875 over 12,000 bounded
+  records, 326,461,487 input tokens at 115,219 tok/s, wall 3,265 s, peak 46.8 GB. Spend
+  $5.08364. `capability: not established` and all six fixed completions were still repetitive
+  and wrong (for example `2 + 3 =` -> `3` then a repeated `- n = 3 = 3`), so report the loss
+  number as a technical result only.
+- A run that ends because its cosine finished is different from one the clock cut: `stop_reason:
+  completed` means the step cap was reached. At equal steps the second run trailed the first
+  (step 4500: 3.7404 run1 vs 3.8139 run2) because the learning-rate warmup, cosine decay and
+  `bp_steps` warmup now actually affect training, and it finished lower only by running 10,000
+  steps instead of 4,505. Compare like for like before crediting a schedule change.
+- Verda reuses IP addresses across instances, so a `known_hosts` entry pinned by an earlier
+  run makes `StrictHostKeyChecking=accept-new` abort instead of re-learning the key, and the
+  bootstrap retry loop spins while the GPU bills. Clear the file at the start of every run.
+  Observed cost of the stale entry: roughly $0.8 of H100 time across ~28 attempts.
+- macOS has no `setsid` binary, so a `nohup` job that is merely backgrounded dies with the
+  shell that started it. `work/verda-scale-private/launch-detached.py` double-forks into a new
+  session; use it for anything that must outlive the invoking shell.
+- Ship `trained/export.pt`, not `trained/latest.pt`. `latest.pt` carries the optimizer state
+  (3.7 GB against 749 MB of weights) and a wall-clock-bounded run never resumes from it, so
+  that extra weight is downloaded while the H100 is still billing and then never read.
+  Dropping it took the archive from 5.25 GB to 2.25 GB: 52 files, 2,252,554,748 bytes, every
+  SHA-256 matching, and `trained/best-export.pt` reloaded on CPU here and reproduced the same
+  step-9750 text the GPU produced.
+- A push to the upstream `XiaoYee/HRM-MoE` is denied (403) for `albin-holmgren`, so the branch
+  is published to the fork `albin-holmgren/HRM-MoE` instead.

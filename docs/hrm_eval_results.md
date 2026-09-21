@@ -1027,3 +1027,18 @@ AIME25 Majority Voting（百分比）：
 - `nord_pilot/run.py` 原先把 train.jsonl/valid.jsonl 读入内存并逐条编码，对 1,260 万 chunk 不可能运行。新增 `nord_pilot/data_tools/streaming.py`（`JsonlCorpus`）：一次遍历同时建立行偏移索引与文件 sha256，按 `--seed` 生成训练置换，仅在取 batch 时解码单条记录；索引阶段顺带提供 resume fingerprint 所需的 digest，避免第二次读 18 GB。新增 `--valid-records` 用于限定评估规模。
 - 新增 7 项 streaming 测试，本地 35 项测试全部通过；`nord_pilot.test_local` 精确恢复门槛仍为 75 tensors、`max_abs_difference: 0.0`。真实语料实测：8.5s 建立 1,260 万条索引且 RSS 0.37 GB，解码 14,140 records/s，trainer 可直接在 `../real-data-scale` 上跑 3 steps。
 - 以上均为本地免费工作。下一步付费 GPU 预训练尚未执行，模型规模需先确认。
+
+## 2026-09-21 缩放语料 H100 第二次付费运行（revision `100bd18`）
+
+- 1x H100 80GB / FIN-02，`1H100.80S.32V`，$3.348/h，容器 wall-clock 预算 60 分钟；本地与远程 guard 仍限制 2 小时或 $8。使用 `staged-corpus` 3,000,000 train / 40,000 valid 条前缀（前置 `preflight.py` 免费校验通过）。
+- 免费门槛在付费步骤前全部通过：54 项仓库测试 OK、`test-plan-gate.py` 5/5、`test-pass-gate.py` 7/7。
+- native FA3 与 Triton expert gate 通过；batch probe 实测 batch 32,768 时 149,256 tok/s，为最高候选，训练实际选定 32,768，8 个 expert 全部被路由。20 vs 10+10 fresh-process recovery：256 tensors，`max_abs_difference: 0.0`。
+- 187,219,968 参数（h768/L8，8 experts top-2，H=2/L=3）。10,000 steps 完整跑完余弦调度：`stop_reason: completed`。valid loss 10.97629937151646 -> best 3.5718350700864128（step 9750），final_valid_loss 3.567718028942812。
+- 全新 held-out `test-fresh.jsonl` 有界评分（12,000 条）：10.97513985581203 -> 3.6312330527437875。test 未参与 checkpoint selection；泄漏检查为有界抽查，不是完整审计。
+- 326,461,487 input tokens，training 2,833.39s，115,219 tok/s，wall 3,265.11s，peak allocated 46.84 GB。
+- PASS.json：`scaled_real_corpus_technical_run: pass`、`capability: not established`。六条固定 completion 仍然重复且错误（`Stockholm is the capital of` 反复生成 the United States；`2 + 3 =` 先给 3 再进入重复的 `- n = 3 = 3`）。loss 下降不等于能力，本次不构成可售或 GPT-level 证据。
+- 与第一次运行按相同 step 比较：step 4500 时 run1 为 3.7404、run2 为 3.8139，即同 step 下 run2 更差；run2 最终更低仅因为多跑了 10,000 步而非 4,505 步。原因是本轮 LR warmup、cosine decay 与 `bp_steps` warmup 真正生效。不能把最终数字归因于调度改动。
+- 归档 52 文件 / 2,252,554,748 bytes，逐项 SHA-256 全匹配；`trained/best-export.pt` 在本机 CPU 重新加载并复现 GPU 端相同的 step-9750 生成文本。为省下载时间，本轮归档 `trained/export.pt`，不再归档带 3.7 GB optimizer state 的 `latest.pt`。
+- 清理确认：实例删除、volume 删除、临时 SSH key 删除，active instances=[] / active volumes=[]。balance $16.93983 -> $11.85619（当前 $12.31613），本轮扣费 $5.08364。
+- 修复两个付费陷阱：Verda 跨实例复用 IP 导致陈旧 `known_hosts` 让 accept-new 失败、bootstrap 空转约 28 次（约 $0.8 的 H100 时间），现在每轮开始清空 `known_hosts`；macOS 没有 `setsid`，普通后台 nohup 会随启动它的 shell 退出，改用 `launch-detached.py` 双 fork。
+- 另需记录：诊断期间曾意外创建一台未受 guard 保护的 H100（一个 keep_detached payload 探测绕过了守卫路径），约 90 秒内删除，净支出 $0.0。这是错误操作，不应在守卫路径之外提交看似合理的创建请求。
