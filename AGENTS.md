@@ -641,3 +641,21 @@ GPU, distributed, FA3, and FSDP2 behavior should be validated through rjob.
   caught and recorded as `status='out_of_memory'`, still writing the exports, the summary and
   the held-out score. What a paid run is worth is decided by what is on disk after a crash, not
   by the loss it had reached.
+- The fourth paid scaled run (revision `57eb046`, 80-minute container budget, same weights-only
+  continuation as run 3) is the first one to end with both a real improvement and the weights to
+  prove it. The probe, now measuring at bp depth 5, chose 32768 (38.59 GB, 106,529 tok/s) and
+  rejected 65536 at 74.24 GB against the 72% cap; training peaked at 41.47 GB and never came
+  close to the wall. It ran 14,435 steps to a `bounded_stop`, valid loss 3.5677181313835526 ->
+  best 3.346430978471196 at step 13500, held-out fresh test 3.627118079948865 -> 3.404421970418065
+  over 12,000 bounded records, 471,251,490 input tokens at 111,941 tok/s in 4,210 s of training
+  with 4,815 s of wall. That is roughly 0.23 of held-out loss below the run-2 weights it started
+  from. Spend $6.21334. All three exports reloaded on CPU here with 43 finite tensors, and the
+  best export reproduced the GPU's greedy text word for word. `capability` is still
+  "not established": all six fixed completions are wrong, greedy still says "the United States of
+  America" for Stockholm and sampling only makes the errors more varied.
+- Verda's list endpoints lag a soft delete, so a cleanup that deletes an instance and a volume and
+  then reads the listings once will fail its own assertion against a resource it already removed.
+  That happened on run 4 and sent the script down the `force-release.py` fallback, which found the
+  instance gone and re-deleted the volume idempotently. `cleanup.py` now retries the listings
+  until the deleted ids disappear. Deleting is the action that stops billing; the listing is only
+  the proof, so the proof is what should wait.

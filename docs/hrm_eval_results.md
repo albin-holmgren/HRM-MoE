@@ -1054,3 +1054,17 @@ AIME25 Majority Voting（百分比）：
 - **但权重不可恢复**：collector 只运回 `full/export.pt`、`trained/best-export.pt`、`trained/export.pt`、`trained/summary.json`；当时 `best-export.pt` 只在训练循环正常退出后的路径上写，而 step-3000 的 `latest.pt` 留在磁盘上被实例删除一并丢弃。于是 "loss 改善了" 成为一个没有权重支撑的数字。这使本轮成为**非证据性运行**：`technical_pass: null`。
 - 归档 49 文件 / 752,484,193 bytes，逐项 SHA-256 全匹配（archive 内不存在可用训练权重）；清理确认：实例删除、volume 删除、临时 SSH key 删除，active instances=[] / active volumes=[]。balance $12.31613 -> $8.92018，本轮扣费 **$3.39595**。
 - 本轮暴露的三个付费缺陷已在同一 session 内修复并各有单元测试固定：(1) `batch_probe.py` 现在以 `MEASUREMENT_BP_STEPS=5` 测量真实深度，并以 `MAX_PEAK_FRACTION=0.72` 拒绝没有余量的候选，即便它更快；(2) `run.py` 在找到更好权重时立即写 `best-export.pt`，并新增 `latest-weights.pt`；(3) OOM 被捕获为干净的 `status='out_of_memory'` 中断，仍会写 export、summary 与 held-out 评分，而不再以 traceback 结束。教训：付费运行的价值取决于崩溃时磁盘上剩下什么，而不是崩溃时的 loss 数字。
+
+## 2026-09-21 缩放语料 H100 第四次付费运行：本预算下最好的结果（revision `57eb046`）
+
+- 目的：用 run3 修复后的流程重做同一件事，验证"把 run3 的 OOM 修好后能否在预算内拿到一个真正有权的、held-out 更低的模型"。1x H100 80GB / FIN-02，`1H100.80S.32V`，$3.348/h，容器 wall-clock 预算 80 分钟；本地与远程 guard 上限 2 小时或 $9。这是本预算的最后一轮。
+- 初始化：`--init-export` 仍用 run2 的 `trained/export.pt`（sha256 `dfc86b7f546c8b19a038f33bf686a13cc03935dc3dc840d9a58fa9dc591901a9`，step 10000，43 tensors）。weights-only 续跑，fresh optimizer，187,219,968 参数；`schedule_steps=16500`、`lr=1e-4`、seed 20260922、`eval-every 500`。
+- 免费门槛在付费前全部通过：59 项仓库测试 OK、plan gate 10/10、pass gate 9/9（含新增的两个 OOM 用例）、parent export 重新校验通过（43 tensors，全部 finite）。kernel gate PASS（native FA3 + Triton experts on H100 80GB HBM3），recovery gate PASS（256 tensors，`max_abs_difference 0.0`）。
+- **run3 的根因确实被修好**：batch probe 现在在真实 bp 深度（`MEASUREMENT_BP_STEPS=5`）下测量，2048->5.97 GB / 5,160 tok/s，8192->13.5 GB，16384->21.53 GB，32768->38.59 GB / 106,529 tok/s，65536->74.24 GB 被 72%（57.6 GB）上限正确拒绝。选中 32768。训练期实测 peak 41.47 GB，余量充足，再无 OOM。
+- 14,435 steps 后由 80 分钟时钟正常收尾（`stop_reason: bounded_stop`，未触发 step 上限）。valid loss 3.5677181313835526（step 0 = 父模型本身）-> **best 3.346430978471196（step 13500）**，final 3.3406782043656964；每个检查点都单调改善，8 个 expert 全部被路由，无 NaN、无 dead expert。
+- 与同一 lineage 的历史比较：run2 的 best valid 为 3.5718、fresh test 为 3.6312；本轮的 best valid 3.3464、fresh test 3.4044，即在**同样的父权重之上**再降低约 0.23。这是本项目到目前最好的技术数字。
+- 全新 held-out `test-fresh.jsonl` 有界评分（12,000 条 / 2,688,641 target tokens）：3.627118079948865 -> **3.404421970418065**。test 未参与 checkpoint selection；泄漏检查仍是有界抽查。471,251,490 input tokens，4,209.82s training，111,941 tok/s，wall 4,814.64s。
+- 归档 57 文件 / 3,002,985,002 bytes，逐项 SHA-256 全匹配（本轮起 collector 额外运回 `trained/latest-weights.pt`，因此归档从 2.25 GB 增至 3.0 GB，换取崩溃后可恢复的权重）。本机 CPU 重新加载三份 export：`best-export.pt` step 13500 / `export.pt` 与 `latest-weights.pt` step 14435，各 43 tensors、187,220,736 参数、全部 floating tensor finite，且本地 greedy 生成与 GPU 端逐字一致。`best-export.pt` 在 16 篇 fresh-test 切片上复现 loss 3.345691470425837，与 GPU 数字吻合。
+- `PASS.json`：`scaled_real_corpus_technical_run: pass`、`capability: not established`。六条固定 completion 仍然不可用：greedy 下 `Stockholm is the capital of` 依旧生成 "the United States of America" 并复读，`2 + 3 =` 给出 "3" 后转入无关模板；改用采样（t=0.8/top-p=0.95/repeat-penalty=1.15）后句子更多样但内容同样错误。**loss 下降不等于能力**，本轮不构成 GPT-level、可售或指令能力的证据。
+- 清理：实例删除、volume soft-delete、临时 SSH key 删除，最终 `/instances`、`/volumes`、`/sshkeys` 全为空且 balance 稳定不变。balance $9.43222 -> $3.21888，本轮扣费 **$6.21334**（4 个计费块，$6.78 的估算之内）。
+- 新增缺陷与修复：正常 `cleanup.py` 删除了实例与 volume 后，其自身断言因 Verda 列表端点对 soft-delete 有延迟而失败，`run4-final.sh` 因此走到 `force-release.py` 兜底（该兜底发现实例已删，仅幂等重删 volume）。已把 `cleanup.py` 的验证改为等待列表更新而非只读一次。删除才是止付动作，列表只是证明，应该等的是证明。
